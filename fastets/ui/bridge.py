@@ -378,7 +378,10 @@ class FastETSApi:
         tools = AudioTools(logger=self._log)
         raw = config.voice_dir() / f"sample_{kind}.input"
         raw.write_bytes(payload)
-        info = tools.probe(raw)
+        try:
+            info = tools.probe(raw)
+        except Exception as exc:  # noqa: BLE001
+            return self._fail(f"无法检查音频文件: {exc}")
         if not info.get("duration_ms"):
             return self._fail(
                 "无法识别这个音频文件（ffmpeg 解码失败）。"
