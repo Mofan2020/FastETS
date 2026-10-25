@@ -162,11 +162,7 @@ class _MacKeychain:
     @staticmethod
     def trusted_executable() -> str:
         """The binary that is allowed to read the keychain item."""
-        candidate = Path(sys.executable).resolve()
-        # Inside a .app bundle the executable is .../Contents/MacOS/<name>.
-        if candidate.parent.parent.name == "MacOS" and candidate.parent.parent.parent.suffix == ".app":
-            return str(candidate)
-        return str(candidate)
+        return str(Path(sys.executable).resolve())
 
     def _keychain_password(self) -> bytes:
         sidecar = self.path.with_name(KEYCHAIN_PASSWORD_FILE)
@@ -509,14 +505,7 @@ class CredentialStore:
 
     def load(self) -> Dict[str, str]:
         self.last_error = ""
-        try:
-            raw = self._backend.load(self.ITEM_ACCOUNT)
-        except CredentialError as exc:
-            self.last_error = str(exc)
-            return {}
-        except Exception as exc:  # noqa: BLE001 - a broken store must not crash the app
-            self.last_error = str(exc)
-            return {}
+        raw = self._load_with_timeout()
         if not raw:
             return {}
         try:
@@ -526,6 +515,37 @@ class CredentialStore:
         if not isinstance(data, dict):
             return {}
         return {str(key): str(value) for key, value in data.items()}
+
+    def _load_with_timeout(self, timeout: float = 8.0) -> str:
+        """Read the secret without ever freezing the interface.
+
+        The keychain can decide to ask the user for permission (for example
+        after the application was replaced).  Interaction is switched off, so
+        the call normally fails right away - but a defensive timeout keeps the
+        window responsive even if it does not.
+        """
+        import threading
+
+        result: Dict[str, Any] = {}
+
+        def worker() -> None:
+            try:
+                result["value"] = self._backend.load(self.ITEM_ACCOUNT)
+            except CredentialError as exc:
+                result["error"] = str(exc)
+            except Exception as exc:  # noqa: BLE001
+                result["error"] = str(exc)
+
+        thread = threading.Thread(target=worker, name="fastets-keychain", daemon=True)
+        thread.start()
+        thread.join(timeout)
+        if thread.is_alive():
+            self.last_error = "读取系统凭据超时，请重新登录一次"
+            return ""
+        if "error" in result:
+            self.last_error = str(result["error"])
+            return ""
+        return str(result.get("value") or "")
 
     def delete(self) -> bool:
         try:
