@@ -1,0 +1,13 @@
+# FastETS runtime dependencies
+#
+# Python 3.9+ is required. PyWebView needs extra backends on some platforms:
+#   macOS   -> pip install "pywebview[qt]"   (or use the built-in WKWebView)
+#   Windows -> pip install pywebview          (EdgeChromium/WebView2 backend)
+
+requests>=2.31
+pywebview>=4.4
+pyzipper>=0.3.6
+
+# Bundles a static ffmpeg binary for macOS + Windows so users do not have to
+# install ffmpeg themselves. Safe to drop if you provide your own ffmpeg.
+imageio-ffmpeg>=0.4.9

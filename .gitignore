@@ -1,0 +1,23 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.venv-build/
+build/
+dist/
+dist-pkg/
+release-assets/
+*.spec.bak
+.pytest_cache/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# local runtime data
+*.log
+.env
+.env.*

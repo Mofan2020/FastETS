@@ -1,0 +1,134 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and publish"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  # ---- gate: the automated tests must pass before anything is published ----
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.11"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Self test
+        run: python tests/selftest.py
+
+  build:
+    name: build (${{ matrix.name }})
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS (Apple Silicon)
+            os: macos-latest
+            python: "3.11"
+            artifact: FastETS-macOS-arm64
+          - name: macOS (Intel)
+            os: macos-13
+            python: "3.11"
+            artifact: FastETS-macOS-x64
+            allow_failure: true
+          - name: Windows (x64)
+            os: windows-latest
+            python: "3.11"
+            artifact: FastETS-Windows-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build (PyInstaller)
+        run: pyinstaller --noconfirm --clean packaging/FastETS.spec
+
+      - name: Package macOS
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p dist-pkg
+          APP="dist/FastETS.app"
+          if [ -d "$APP" ]; then
+            cp -R "$APP" dist-pkg/
+            cd dist-pkg && zip -r "../${{ matrix.artifact }}.zip" "FastETS.app" -x '*.DS_Store'
+          else
+            zip -r "../${{ matrix.artifact }}.zip" dist/FastETS
+          fi
+
+      - name: Package Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/FastETS/* -DestinationPath "${{ matrix.artifact }}.zip"
+          New-Item -ItemType Directory -Force -Path dist-pkg | Out-Null
+          Move-Item -Force "${{ matrix.artifact }}.zip" dist-pkg/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            dist-pkg/${{ matrix.artifact }}.zip
+            dist/FastETS.app
+            dist/FastETS
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: publish pre-release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Collect archives
+        run: |
+          mkdir -p release-assets
+          find artifacts -name "*.zip" -exec cp {} release-assets/ \;
+          ls -la release-assets
+
+      - name: Publish GitHub pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: ${{ github.event.inputs.tag || github.ref_name }}
+          prerelease: true
+          draft: false
+          fail_on_unmatched_files: true
+          files: release-assets/*.zip
+          body_path: RELEASE_NOTES.md

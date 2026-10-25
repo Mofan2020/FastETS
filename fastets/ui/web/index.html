@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>FastETS</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<!-- ============ 免责声明（首次启动强制显示） ============ -->
+<div id="disclaimer" class="overlay hidden">
+  <div class="modal disclaimer-modal">
+    <div class="modal-head">
+      <h2 id="disclaimer-title">使用前必读 · 免责声明</h2>
+    </div>
+    <div class="modal-body">
+      <pre id="disclaimer-text" class="disclaimer-text"></pre>
+    </div>
+    <div class="modal-foot">
+      <button id="disclaimer-reject" class="btn btn-ghost danger">不同意，退出程序</button>
+      <button id="disclaimer-accept" class="btn btn-primary">我已阅读并同意</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 账号选择 ============ -->
+<div id="account-picker" class="overlay hidden">
+  <div class="modal">
+    <div class="modal-head"><h2>选择要使用的年级 / 班级</h2></div>
+    <div class="modal-body"><div id="account-list" class="account-list"></div></div>
+    <div class="modal-foot">
+      <button id="account-cancel" class="btn btn-ghost">取消</button>
+    </div>
+  </div>
+</div>
+
+<div class="app">
+  <!-- ============ 侧边栏 ============ -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">FE</div>
+      <div>
+        <div class="brand-name">FastETS</div>
+        <div class="brand-sub">易听说作业助手</div>
+      </div>
+    </div>
+
+    <nav class="nav">
+      <button class="nav-item active" data-tab="account"><span class="nav-ico">◍</span><span class="nav-label">账号</span></button>
+      <button class="nav-item" data-tab="homework"><span class="nav-ico">▤</span><span class="nav-label">作业</span></button>
+      <button class="nav-item" data-tab="voice"><span class="nav-ico">◐</span><span class="nav-label">声音</span></button>
+      <button class="nav-item" data-tab="settings"><span class="nav-ico">⚙</span><span class="nav-label">设置</span></button>
+    </nav>
+
+    <div class="side-status">
+      <div class="side-row"><span>状态</span><b id="status-text">未登录</b></div>
+      <div class="side-row"><span>账号</span><b id="side-account">—</b></div>
+      <div class="side-row"><span>声音</span><b id="side-voice">未克隆</b></div>
+      <div class="side-row"><span>模式</span><b id="side-mode">演练</b></div>
+    </div>
+    <button id="show-disclaimer" class="linkish">查看免责声明</button>
+  </aside>
+
+  <!-- ============ 主区 ============ -->
+  <main class="main">
+    <header class="topbar">
+      <h1 id="page-title">账号</h1>
+      <div class="topbar-right">
+        <span id="env-badge" class="badge hidden"></span>
+        <button id="refresh-all" class="btn btn-ghost">刷新</button>
+      </div>
+    </header>
+
+    <div class="content">
+      <!-- ---------- 账号 ---------- -->
+      <section class="page active" data-page="account">
+        <div class="card">
+          <h2 class="card-title">登录易听说</h2>
+          <p class="card-hint">使用你的 E听说 手机号与密码登录。登录后程序会自动拉取所有未完成的作业（含作业集）。</p>
+          <div class="grid-2">
+            <label class="field">
+              <span>手机号</span>
+              <input id="login-phone" type="tel" inputmode="numeric" placeholder="13800138000" autocomplete="username" />
+            </label>
+            <label class="field">
+              <span>密码</span>
+              <input id="login-password" type="password" placeholder="登录密码" autocomplete="current-password" />
+            </label>
+          </div>
+          <label class="check"><input id="login-remember" type="checkbox" checked /> <span>记住密码（本机保存）</span></label>
+          <div class="row-actions">
+            <button id="btn-login" class="btn btn-primary">登录</button>
+            <button id="btn-changyan" class="btn btn-secondary">用讯飞/畅言账号登录</button>
+            <button id="btn-logout" class="btn btn-ghost">退出登录</button>
+          </div>
+          <details class="advanced">
+            <summary>使用 Token 登录</summary>
+            <div class="row-actions">
+              <input id="token-input" type="text" placeholder="粘贴从官方客户端抓取的 token" class="grow" />
+              <button id="btn-import-token" class="btn btn-secondary">导入</button>
+            </div>
+            <p class="card-hint">从官方客户端的请求头中复制 token，配合设备码使用。</p>
+          </details>
+        </div>
+
+        <div class="card">
+          <h2 class="card-title">设备信息</h2>
+          <p class="card-hint">机器码用于设备绑定，必须保持稳定，否则服务端会反复要求重新绑定。</p>
+          <div class="row-actions">
+            <code id="device-code" class="code">—</code>
+            <button id="btn-copy-device" class="btn btn-ghost">复制</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------- 作业 ---------- -->
+      <section class="page" data-page="homework">
+        <div class="card">
+          <div class="card-head">
+            <h2 class="card-title">未完成的作业</h2>
+            <div class="row-actions">
+              <select id="homework-status" class="select">
+                <option value="all">全部状态</option>
+                <option value="1">未完成</option>
+                <option value="2">进行中</option>
+                <option value="3">已完成</option>
+              </select>
+              <button id="btn-load-homework" class="btn btn-secondary">拉取作业</button>
+              <button id="btn-inspect" class="btn btn-secondary">解析选中作业</button>
+              <button id="btn-start" class="btn btn-primary">开始完成</button>
+              <button id="btn-redo" class="btn btn-secondary">重做选中</button>
+              <button id="btn-stop" class="btn btn-ghost danger">停止</button>
+            </div>
+          </div>
+          <div id="homework-list" class="list">
+            <p class="empty">点击「拉取作业」获取列表</p>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2 class="card-title">作业内容</h2>
+          <div id="paper-view" class="paper-view"><p class="empty">解析后在这里显示每个大题的题型与朗读文本</p></div>
+        </div>
+      </section>
+
+      <!-- ---------- 声音 ---------- -->
+      <section class="page" data-page="voice">
+        <div class="card">
+          <h2 class="card-title">预配置：声音克隆</h2>
+          <p class="card-hint">按顺序朗读下面的中文与英文文本并录音。系统用这两段样本克隆出你的音色，之后所有作业都用这个声音朗读。</p>
+
+          <div class="sample">
+            <div class="sample-head">
+              <b>中文样本</b>
+              <div class="row-actions">
+                <button class="btn btn-secondary" data-record="zh">开始录音</button>
+                <button class="btn btn-ghost" data-play="zh">试听</button>
+                <label class="btn btn-ghost file-btn">导入文件<input type="file" data-import="zh" accept="audio/*" hidden /></label>
+              </div>
+            </div>
+            <p id="sample-zh" class="sample-text"></p>
+            <div class="meter"><div id="meter-zh" class="meter-fill"></div></div>
+          </div>
+
+          <div class="sample">
+            <div class="sample-head">
+              <b>English sample</b>
+              <div class="row-actions">
+                <button class="btn btn-secondary" data-record="en">Record</button>
+                <button class="btn btn-ghost" data-play="en">Preview</button>
+                <label class="btn btn-ghost file-btn">Import file<input type="file" data-import="en" accept="audio/*" hidden /></label>
+              </div>
+            </div>
+            <p id="sample-en" class="sample-text"></p>
+            <div class="meter"><div id="meter-en" class="meter-fill"></div></div>
+          </div>
+
+          <div class="row-actions">
+            <button id="btn-clone" class="btn btn-primary">克隆声音</button>
+            <button id="btn-test-tts" class="btn btn-secondary">测试合成</button>
+            <span id="voice-status" class="hint"></span>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------- 设置 ---------- -->
+      <section class="page" data-page="settings">
+        <div class="card">
+          <h2 class="card-title">语音服务</h2>
+          <label class="field">
+            <span>服务商</span>
+            <select id="set-provider" class="select">
+              <option value="minimax">MiniMax 声音克隆 + T2A</option>
+              <option value="openai_compat">OpenAI 兼容接口</option>
+              <option value="edge">Microsoft Edge TTS（免密钥）</option>
+            </select>
+          </label>
+
+          <div class="provider-box" data-provider="minimax">
+            <div class="grid-2">
+              <label class="field"><span>MiniMax API Key</span><input id="set-minimax-key" type="password" placeholder="eyJ..." /></label>
+              <label class="field"><span>区域</span>
+                <select id="set-minimax-region" class="select">
+                  <option value="cn">中国区 api.minimaxi.com</option>
+                  <option value="intl">国际区 api.minimax.io</option>
+                  <option value="custom">自定义</option>
+                </select>
+              </label>
+              <label class="field"><span>Base URL</span><input id="set-minimax-base" type="text" placeholder="https://api.minimaxi.com" /></label>
+              <label class="field"><span>模型</span><input id="set-minimax-model" type="text" placeholder="speech-2.6-hd" /></label>
+              <label class="field"><span>Language Boost</span><input id="set-minimax-lang" type="text" placeholder="auto" /></label>
+            </div>
+          </div>
+
+          <div class="provider-box" data-provider="openai_compat">
+            <div class="grid-2">
+              <label class="field"><span>Base URL</span><input id="set-openai-base" type="text" placeholder="https://api.openai.com/v1" /></label>
+              <label class="field"><span>API Key</span><input id="set-openai-key" type="password" placeholder="sk-..." /></label>
+              <label class="field"><span>模型</span><input id="set-openai-model" type="text" placeholder="tts-1" /></label>
+              <label class="field"><span>音色名 / voice</span><input id="set-openai-voice" type="text" placeholder="alloy" /></label>
+            </div>
+            <label class="field">
+              <span>克隆端点（可选）</span>
+              <input id="set-openai-clone" type="text" placeholder="http://127.0.0.1:9880/clone" />
+            </label>
+            <p class="card-hint">支持 OpenAI、Azure、Groq，以及暴露 <code>/audio/speech</code> 的本地克隆服务（GPT-SoVITS / CosyVoice / IndexTTS 等）。</p>
+          </div>
+
+          <div class="provider-box" data-provider="edge">
+            <label class="field"><span>音色</span><input id="set-edge-voice" type="text" placeholder="en-US-AriaNeural" /></label>
+          </div>
+
+          <div class="grid-2">
+            <label class="field"><span>语速</span><input id="set-speed" type="number" step="0.05" min="0.5" max="2" /></label>
+            <label class="field"><span>音调</span><input id="set-pitch" type="number" step="1" min="-12" max="12" /></label>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2 class="card-title">评分口径</h2>
+          <label class="field">
+            <span>方式</span>
+            <select id="set-score-mode" class="select">
+              <option value="target">按目标分上报（默认题型满分）</option>
+              <option value="estimate">按朗读表现估算</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>目标分比例 <b id="ratio-value">1.00</b></span>
+            <input id="set-score-ratio" type="range" min="0" max="1" step="0.05" />
+          </label>
+          <label class="check"><input id="set-dry-run" type="checkbox" /> <span>演练模式（只生成并上传，不提交成绩）</span></label>
+        </div>
+
+        <div class="card">
+          <h2 class="card-title">节奏与防限流</h2>
+          <label class="check"><input id="set-pace" type="checkbox" /> <span>启用拟人节奏（按朗读时长等待）</span></label>
+          <div class="grid-2">
+            <label class="field"><span>请求间隔 (ms)</span><input id="set-delay" type="number" min="0" step="50" /></label>
+            <label class="field"><span>随机抖动比例</span><input id="set-jitter" type="number" min="0" max="2" step="0.1" /></label>
+            <label class="field"><span>朗读语速 (词/分钟)</span><input id="set-wpm" type="number" min="0" max="400" step="10" /></label>
+            <label class="field"><span>大题间隔 (ms)</span><input id="set-section-pause" type="number" min="0" step="200" /></label>
+            <label class="field"><span>最小朗读等待 (ms)</span><input id="set-min-read" type="number" min="0" step="100" /></label>
+            <label class="field"><span>最大朗读等待 (ms)</span><input id="set-max-read" type="number" min="0" step="500" /></label>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2 class="card-title">高级</h2>
+          <label class="field"><span>ffmpeg 路径（留空则自动探测）</span><input id="set-ffmpeg" type="text" placeholder="/usr/local/bin/ffmpeg" /></label>
+          <label class="field"><span>重做时的重置路由（可选）</span><input id="set-redo-route" type="text" placeholder="留空 = 直接重新提交覆盖旧记录" /></label>
+          <label class="check"><input id="set-skip-ssl" type="checkbox" /> <span>跳过 SSL 证书校验（不推荐）</span></label>
+          <label class="check"><input id="set-keep-cache" type="checkbox" /> <span>保留生成的音频缓存</span></label>
+          <div class="row-actions">
+            <button id="btn-save-settings" class="btn btn-primary">保存设置</button>
+            <button id="btn-check-env" class="btn btn-secondary">环境自检</button>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ============ 日志条 ============ -->
+    <footer class="logbar">
+      <div class="logbar-head">
+        <span id="log-title">就绪</span>
+        <div class="progress"><div id="progress-fill" class="progress-fill"></div></div>
+        <button id="log-toggle" class="linkish">展开日志</button>
+      </div>
+      <pre id="log-body" class="log-body hidden"></pre>
+    </footer>
+  </main>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
