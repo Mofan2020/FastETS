@@ -22,6 +22,10 @@ from ..core.session import Session
 from ..jobs.runner import JobRunner
 from ..voice import ProviderError, build_provider, resolve_voice_id
 
+# How long the run waits for the user to pick one of the sample answers
+# before it continues with the first one.
+CHOICE_TIMEOUT_SECONDS = 180
+
 # Texts the user has to read for the voice clone. The English prompt is what
 # MiniMax uses as `clone_prompt.prompt_audio` so the cloned voice keeps a
 # natural English timbre.
@@ -83,6 +87,10 @@ class FastETSApi:
         self._changyan_result: Optional[Dict[str, str]] = None
         self._changyan_started_at = 0.0
         self._lock = threading.Lock()
+        self._choose_lock = threading.Lock()
+        self._choose_request: Optional[Dict[str, Any]] = None
+        self._choose_event: Optional[threading.Event] = None
+        self._choose_choice: Optional[str] = None
 
     # -- helpers -------------------------------------------------------------
 
@@ -92,10 +100,75 @@ class FastETSApi:
             settings=config.load_settings(),
             logger=self._log,
             progress=progress,
+            chooser=self._ask_user_choice,
         )
 
     def _set_window(self, window) -> None:
         self._window = window
+
+    # -- manual answer choice -------------------------------------------------
+
+    def _ask_user_choice(self, request: Dict[str, Any]) -> str:
+        """Ask the user which of the sample answers should be read.
+
+        The run waits on a worker thread while the UI shows the options; if
+        nobody answers in time the first option is used so the run keeps
+        going.
+        """
+        key = str(request.get("key") or "")
+        options = [str(item) for item in (request.get("options") or [])]
+        label = str(request.get("label") or "")
+        if not options:
+            return ""
+
+        with self._choose_lock:
+            event = threading.Event()
+            self._choose_event = event
+            self._choose_request = {"key": key, "label": label, "options": options}
+            self._choose_choice = None
+
+        self.runner.progress(
+            {
+                "stage": "choose",
+                "message": f"请选择要朗读的示例答案：{label}",
+                "choose": {
+                    "key": key,
+                    "label": label,
+                    "options": options,
+                },
+            }
+        )
+        answered = event.wait(timeout=CHOICE_TIMEOUT_SECONDS)
+        with self._choose_lock:
+            choice = self._choose_choice
+            self._choose_event = None
+            self._choose_request = None
+            self._choose_choice = None
+        if not answered or choice is None:
+            if self._log:
+                self._log.info("选择答案超时，改用第一个示例答案: %s", label)
+            return options[0]
+        return choice
+
+    def choose_answer(self, key: str, index: int) -> Dict[str, Any]:
+        """Called by the UI when the user picked one of the sample answers."""
+        with self._choose_lock:
+            request = self._choose_request or {}
+            event = self._choose_event
+            if not request or event is None:
+                return self._fail("当前没有等待选择的问题")
+            if str(request.get("key") or "") != str(key or ""):
+                return self._fail("选择请求已过期")
+            options = list(request.get("options") or [])
+            try:
+                position = int(index)
+            except (TypeError, ValueError):
+                position = -1
+            if position < 0 or position >= len(options):
+                return self._fail("选项序号无效")
+            self._choose_choice = options[position]
+        event.set()
+        return self._ok(chosen=self._choose_choice)
 
     def _ok(self, **extra: Any) -> Dict[str, Any]:
         payload = {"ok": True}

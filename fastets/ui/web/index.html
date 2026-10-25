@@ -35,6 +35,21 @@
   </div>
 </div>
 
+<!-- ============ 复述 / 表达：挑一个示例答案 ============ -->
+<div id="answer-picker" class="overlay hidden">
+  <div class="modal answer-modal">
+    <div class="modal-head">
+      <h2>选择要朗读的示例答案</h2>
+      <p id="answer-picker-label" class="card-hint"></p>
+    </div>
+    <div class="modal-body"><div id="answer-list" class="answer-list"></div></div>
+    <div class="modal-foot">
+      <button id="answer-cancel" class="btn btn-ghost">用第一个</button>
+      <button id="answer-confirm" class="btn btn-primary">朗读这一份</button>
+    </div>
+  </div>
+</div>
+
 <div class="app">
   <!-- ============ 侧边栏 ============ -->
   <aside class="sidebar">
@@ -218,6 +233,16 @@
               <option value="minimax">MiniMax 声音克隆 + T2A</option>
               <option value="openai_compat">OpenAI 兼容接口</option>
               <option value="edge">Microsoft Edge TTS（免密钥）</option>
+              <option value="macos">macOS 系统朗读（免密钥，仅 macOS）</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>主服务失败时的备用服务</span>
+            <select id="set-tts-fallback" class="select">
+              <option value="macos">macOS 系统朗读（推荐，免密钥）</option>
+              <option value="edge">Microsoft Edge TTS（免密钥）</option>
+              <option value="none">不启用备用服务</option>
             </select>
           </label>
 
@@ -255,10 +280,28 @@
             <label class="field"><span>音色</span><input id="set-edge-voice" type="text" placeholder="en-US-AriaNeural" /></label>
           </div>
 
+          <div class="provider-box" data-provider="macos">
+            <label class="field"><span>系统音色</span><input id="set-macos-voice" type="text" placeholder="Samantha" /></label>
+            <p class="card-hint">macOS 自带的朗读音色，不需要账号也不需要联网。在「声音」页点「获取音色列表」可以查看系统里全部可用的音色。</p>
+          </div>
+
           <div class="grid-2">
             <label class="field"><span>语速</span><input id="set-speed" type="number" step="0.05" min="0.5" max="2" /></label>
             <label class="field"><span>音调</span><input id="set-pitch" type="number" step="1" min="-12" max="12" /></label>
           </div>
+        </div>
+
+        <div class="card">
+          <h2 class="card-title">复述 / 表达的示例答案</h2>
+          <p class="card-hint">这两个大题在资源包里带多份示例答案，程序需要挑一份来朗读。</p>
+          <label class="field">
+            <span>选择方式</span>
+            <select id="set-answer-pick" class="select">
+              <option value="first">默认读第一个</option>
+              <option value="random">每次随机一个</option>
+              <option value="manual">每次手动选择</option>
+            </select>
+          </label>
         </div>
 
         <div class="card">

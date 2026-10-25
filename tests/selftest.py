@@ -800,6 +800,292 @@ def test_speex_matches_ffmpeg() -> None:
     check("helper output is deterministic", again == payload)
 
 
+def test_answer_candidates() -> None:
+    """复述 / 表达 ship several sample answers - one of them gets read."""
+    from fastets.core import paper as paper_mod
+
+    payload = {
+        "structure_type": "collector.picture",
+        "info": {
+            "std": [
+                {"value": "First sample answer."},
+                {"value": "Second sample answer."},
+                {"value": "Third sample answer."},
+            ],
+            "value": "W: the source dialogue.",
+            "topic": "The topic",
+        },
+    }
+    section = paper_mod.parse_content_json(payload, "hw", "url", "复述")
+    question = section.questions[0]
+    check("sample answers are parsed", len(question.answers) == 3, str(len(question.answers)))
+    check(
+        "sample answers become candidates",
+        list(question.answer_candidates) == question.answers,
+    )
+    check(
+        "the source dialogue is still available",
+        question.read_text.startswith("W:"),
+        question.read_text[:20],
+    )
+
+    # Without a candidate the parsed text is read as before.
+    plain = paper_mod.parse_content_json(
+        {
+            "structure_type": "collector.read",
+            "info": {"value": "A single sentence."},
+        },
+        "hw",
+        "url",
+        "朗读句子",
+    )
+    check(
+        "other question types have no candidates",
+        not plain.questions[0].answer_candidates,
+    )
+    check(
+        "the override replaces the text",
+        plain.questions[0].speech_segments("Another sentence.")[0]
+        == "Another sentence.",
+    )
+
+
+def test_answer_pick_modes() -> None:
+    """The setting decides which sample answer is read."""
+    from fastets.core import completer as completer_mod
+    from fastets.core import paper as paper_mod
+
+    question = paper_mod.Question(
+        question_id="q1",
+        homework_id="hw",
+        content_url="url",
+        order=1,
+        group_name="复述",
+        structure_type="collector.picture",
+        question_text="topic",
+        answers=["A", "B", "C"],
+        context={},
+        answer_candidates=["A", "B", "C"],
+    )
+
+    def pick(settings, chooser=None):
+        completer = completer_mod.Completer.__new__(completer_mod.Completer)
+        completer.settings = settings
+        completer._chooser = chooser
+        completer._log = None
+        return completer._chosen_answer_text(question, "复述 第 1 题")
+
+    check("first mode reads the first answer", pick({"answer_pick_mode": "first"}) == "A")
+    check(
+        "random mode reads one of the answers",
+        pick({"answer_pick_mode": "random"}) in ("A", "B", "C"),
+    )
+    check(
+        "manual mode uses the user's choice",
+        pick({"answer_pick_mode": "manual"}, lambda request: "C") == "C",
+    )
+    check(
+        "manual mode falls back to the first answer",
+        pick({"answer_pick_mode": "manual"}, lambda request: "nonsense") == "A",
+    )
+    check(
+        "manual mode without a chooser uses the first answer",
+        pick({"answer_pick_mode": "manual"}) == "A",
+    )
+
+
+def test_mark_error_handling() -> None:
+    """An ETS marking outage must not be reported as a failed question."""
+    from fastets.core import completer as completer_mod
+    from fastets.core.ets_api import EtsApiError
+
+    check(
+        "the marking outage is recognised",
+        completer_mod._is_transient_mark_error(
+            EtsApiError("远程获取ets服务失败", 500, "/m/audio/sync-v2")
+        ),
+    )
+    check(
+        "a token error is not treated as transient",
+        not completer_mod._is_transient_mark_error(
+            EtsApiError("token已过期", 401, "/m/audio/sync-v2")
+        ),
+    )
+    check(
+        "other errors are not treated as transient",
+        not completer_mod._is_transient_mark_error(
+            EtsApiError("网络请求失败 /m/audio/sync-v2", None, "/m/audio/sync-v2")
+        ),
+    )
+
+
+def test_macos_voice() -> None:
+    """The macOS system voices are a keyless fallback."""
+    import platform
+
+    from fastets.voice import build_fallback_provider, build_provider
+    from fastets.voice.mac_say import MacSayProvider
+
+    provider = build_provider({"tts_provider": "macos", "macos_voice": "Samantha"})
+    check("the macOS provider is registered", provider.name == "macos")
+    check(
+        "the macOS provider reports its availability",
+        isinstance(MacSayProvider.available(), bool),
+    )
+    if platform.system() != "Darwin":
+        check(
+            "the macOS provider refuses to work on other systems",
+            not MacSayProvider.available(),
+        )
+        print("[SKIP] macOS voice  -> 当前不是 macOS")
+        return
+
+    try:
+        result = provider.synthesize("Hello from the system voice.", voice_id="Samantha")
+        check("the system voice produced audio", len(result.audio) > 1000, f"{len(result.audio)} bytes")
+        check("the audio is a RIFF/WAVE file", result.audio[:4] == b"RIFF")
+    except Exception as exc:  # noqa: BLE001
+        check("the system voice produced audio", False, str(exc))
+
+    fallback = build_fallback_provider({"tts_fallback": "macos"})
+    check("the macOS fallback is available", fallback is not None and fallback.name == "macos")
+    check(
+        "the fallback can be switched off",
+        build_fallback_provider({"tts_fallback": "none"}) is None,
+    )
+
+
+def test_mark_retry() -> None:
+    """A marking outage is retried and never counted as a failed question."""
+    from fastets.core import paper as paper_mod
+    from fastets.core.completer import Completer, LoadedPaper
+    from fastets.core.ets_api import EtsApiError
+    from fastets.voice.base import TTSResult
+    import fastets.core.completer as completer_mod
+
+    from fastets.core import audio as audio_mod
+
+    tools = audio_mod.AudioTools()
+    try:
+        ffmpeg = tools.ffmpeg
+    except Exception as exc:  # noqa: BLE001
+        print(f"[SKIP] mark retry  -> 没有可用的 ffmpeg: {exc}")
+        return
+
+    sample = config.audio_cache_dir() / "selftest_mark.mp3"
+    subprocess.run(
+        [
+            ffmpeg, "-y", "-v", "quiet", "-f", "lavfi",
+            "-i", "sine=frequency=330:duration=1:sample_rate=16000",
+            "-ac", "1", "-ar", "16000", "-c:a", "libmp3lame", "-q:a", "4", str(sample),
+        ],
+        check=False,
+    )
+    if not sample.exists():
+        print("[SKIP] mark retry  -> 无法生成测试音频")
+        return
+    speech = sample.read_bytes()
+
+    class FakeProvider:
+        name = "fake"
+        supports_clone = False
+
+        def synthesize(self, text, voice_id="", speed=1.0, pitch=0, **kwargs):
+            return TTSResult(audio=speech, voice_id=voice_id, provider="fake")
+
+    class FakeSession:
+        token = "tok"
+
+        def ensure_fresh_token(self):
+            return self.token
+
+    class FakeUploader:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def upload(self, local_path, kind):
+            return {"object_key": f"k/{kind}", "url": f"https://cdn.example/{kind}"}
+
+    attempts = []
+
+    class FlakyClient:
+        def oss_upload_config(self, token):
+            return {}
+
+        def submit_audio(self, **kwargs):
+            attempts.append(kwargs)
+            if len(attempts) < 2:
+                raise EtsApiError("远程获取ets服务失败", 500, "/m/audio/sync-v2")
+            return {"code": 0}
+
+    class BrokenClient(FlakyClient):
+        def submit_audio(self, **kwargs):
+            attempts.append(kwargs)
+            raise EtsApiError("远程获取ets服务失败", 500, "/m/audio/sync-v2")
+
+    def build(client):
+        completer = Completer(
+            FakeSession(),
+            settings={
+                "dry_run": False,
+                "pace_enabled": False,
+                "keep_audio_cache": False,
+                "target_score_ratio": 1.0,
+                "score_mode": "target",
+                "ffmpeg_path": "",
+                "mark_retries": 2,
+            },
+        )
+        completer._provider = FakeProvider()
+        completer.session.client = client  # type: ignore[attr-defined]
+        return completer
+
+    def run(client):
+        question = paper_mod.Question(
+            question_id="q1",
+            homework_id="h1",
+            content_url="",
+            order=1,
+            group_name="跟读",
+            structure_type="collector.sentence",
+            question_text="朗读这句话",
+            answers=["Hello everyone, this is a test."],
+            context={"homework_id": "h1", "set_id": "s1", "entity_id": "e1"},
+            max_score=5.0,
+        )
+        paper = LoadedPaper(
+            {"id": "h1", "name": "测试作业"},
+            [paper_mod.Section("跟读", "collector.sentence", [question])],
+        )
+        original = completer_mod.oss.OssUploader
+        completer_mod.oss.OssUploader = FakeUploader  # type: ignore[assignment]
+        original_delay = completer_mod.MARK_RETRY_DELAY_SECONDS
+        completer_mod.MARK_RETRY_DELAY_SECONDS = 0
+        try:
+            return build(client).complete_homework(
+                {"id": "h1", "name": "测试作业"}, paper=paper, dry_run=False
+            )
+        finally:
+            completer_mod.oss.OssUploader = original  # type: ignore[assignment]
+            completer_mod.MARK_RETRY_DELAY_SECONDS = original_delay
+
+    attempts.clear()
+    report = run(FlakyClient())
+    check("the marking call was retried", len(attempts) == 2, str(len(attempts)))
+    check("the retry recovered", report.get("failed") == 0, str(report.get("failed")))
+    check("the question counts as done", report.get("done") == 1, str(report.get("done")))
+
+    attempts.clear()
+    report = run(BrokenClient())
+    check("every attempt was used", len(attempts) == 3, str(len(attempts)))
+    check("a broken marking service is not a failed question", report.get("failed") == 0, str(report.get("failed")))
+    check("the question is reported as unconfirmed", report.get("unconfirmed") == 1, str(report.get("unconfirmed")))
+    check(
+        "the item carries the server message",
+        bool((report.get("items") or [{}])[0].get("segments", [{}])[0].get("message")),
+    )
+
+
 def main() -> int:
     for fn in (
         test_envelope,
@@ -815,6 +1101,11 @@ def main() -> int:
         test_submit_payload,
         test_speex_frames,
         test_speex_matches_ffmpeg,
+        test_answer_candidates,
+        test_answer_pick_modes,
+        test_mark_error_handling,
+        test_mark_retry,
+        test_macos_voice,
         test_completer_offline,
         test_config,
         test_live_api,

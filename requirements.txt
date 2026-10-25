@@ -8,6 +8,10 @@ requests>=2.31
 pywebview>=4.4
 pyzipper>=0.3.6
 
+# Free text-to-speech without an account, used as the backup voice service
+# (and the macOS system voices are the backup of the backup).
+edge-tts>=6.1
+
 # Bundles a static ffmpeg binary for macOS + Windows so users do not have to
 # install ffmpeg themselves. Safe to drop if you provide your own ffmpeg.
 imageio-ffmpeg>=0.4.9

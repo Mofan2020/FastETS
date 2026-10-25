@@ -279,7 +279,16 @@ function renderPapers() {
       (section.questions || []).forEach((q) => {
         const row = document.createElement('div');
         row.className = 'paper-q';
-        const segments = (q.answers && q.answers.length) ? q.answers.join(' / ') : (q.read_text || '');
+        const candidates = q.answer_candidates || [];
+        let segments;
+        if (candidates.length > 1) {
+          // 复述 / 表达：多份示例答案，朗读时只会挑其中一份。
+          segments = `共 ${candidates.length} 份示例答案，朗读时按设置挑选（${escapeHtml(pickModeLabel())}）`;
+        } else if (candidates.length === 1) {
+          segments = candidates[0];
+        } else {
+          segments = (q.answers && q.answers.length) ? q.answers.join(' / ') : (q.read_text || '');
+        }
         row.innerHTML = `<div class="paper-q-text">第 ${q.order} 题 · ${escapeHtml(q.kind || '')} · 满分 ${q.max_score}</div>
                          <div class="paper-q-body">${escapeHtml(segments)}</div>`;
         wrap.appendChild(row);
@@ -463,6 +472,9 @@ const SETTING_FIELDS = [
   ['openai_voice', '#set-openai-voice', 'str'],
   ['openai_clone_endpoint', '#set-openai-clone', 'str'],
   ['edge_voice', '#set-edge-voice', 'str'],
+  ['macos_voice', '#set-macos-voice', 'str'],
+  ['tts_fallback', '#set-tts-fallback', 'str'],
+  ['answer_pick_mode', '#set-answer-pick', 'str'],
   ['tts_speed', '#set-speed', 'num'],
   ['tts_pitch', '#set-pitch', 'num'],
   ['score_mode', '#set-score-mode', 'str'],
@@ -537,6 +549,13 @@ function syncProviderBoxes() {
   });
 }
 
+function pickModeLabel() {
+  const select = $('#set-answer-pick');
+  if (!select) return '默认读第一个';
+  const option = select.options[select.selectedIndex];
+  return option ? option.textContent : '默认读第一个';
+}
+
 $('#set-provider').addEventListener('change', syncProviderBoxes);
 $('#set-score-ratio').addEventListener('input', (e) => {
   $('#ratio-value').textContent = Number(e.target.value).toFixed(2);
@@ -588,6 +607,7 @@ async function pollEvents() {
 const STAGE_LABELS = {
   start: '开始', download: '下载', question: '题目', tts: '合成',
   upload: '上传', submit: '回传', clone: '克隆', done: '完成', error: '错误',
+  choose: '选择', warn: '提示',
 };
 
 function handleEvent(event) {
@@ -595,6 +615,7 @@ function handleEvent(event) {
     const stage = event.stage ? `[${STAGE_LABELS[event.stage] || event.stage}] ` : '';
     if (event.message) log(`${stage}${event.message}`);
     if (event.percent !== null && event.percent !== undefined) setProgress(event.percent);
+    if (event.stage === 'choose' && event.choose) showAnswerPicker(event.choose);
   } else if (event.type === 'log') {
     log(event.message, event.level || 'info');
   } else if (event.type === 'job') {
@@ -608,9 +629,14 @@ function handleEvent(event) {
       }
       if (job.kind === 'complete') {
         const reports = (job.result && job.result.reports) || [];
-        let done = 0, failed = 0;
-        reports.forEach((r) => { done += r.done || 0; failed += r.failed || 0; });
+        let done = 0, failed = 0, unconfirmed = 0;
+        reports.forEach((r) => {
+          done += r.done || 0; failed += r.failed || 0; unconfirmed += r.unconfirmed || 0;
+        });
         log(`作业完成：成功 ${done} 题，失败 ${failed} 题`, failed ? 'warn' : 'info');
+        if (unconfirmed) {
+          log(`另有 ${unconfirmed} 题已提交，但 ETS 评分服务没有确认，请在官方 App 里查看`, 'warn');
+        }
       }
     } else if (job.status === 'failed') {
       toast(`任务失败：${job.error || '未知错误'}`);
@@ -619,6 +645,59 @@ function handleEvent(event) {
     }
   }
 }
+
+/* ------------------------------------------------ 复述 / 表达：选示例答案 */
+let answerPickerState = { key: '', options: [], index: 0 };
+
+function showAnswerPicker(choose) {
+  const options = Array.isArray(choose.options) ? choose.options : [];
+  if (!options.length) return;
+  answerPickerState = { key: choose.key || '', options, index: 0 };
+  $('#answer-picker-label').textContent = choose.label || '';
+  const list = $('#answer-list');
+  list.innerHTML = '';
+  options.forEach((text, index) => {
+    const item = document.createElement('label');
+    item.className = 'answer-item';
+    const radio = document.createElement('input');
+    radio.type = 'radio';
+    radio.name = 'answer-choice';
+    radio.value = String(index);
+    radio.checked = index === 0;
+    radio.addEventListener('change', () => { answerPickerState.index = index; });
+    const body = document.createElement('div');
+    body.className = 'answer-body';
+    const head = document.createElement('div');
+    head.className = 'answer-head';
+    head.textContent = `示例答案 ${index + 1} / ${options.length}`;
+    const content = document.createElement('p');
+    content.className = 'answer-text';
+    content.textContent = text;
+    body.appendChild(head);
+    body.appendChild(content);
+    item.appendChild(radio);
+    item.appendChild(body);
+    list.appendChild(item);
+  });
+  $('#answer-picker').classList.remove('hidden');
+}
+
+function closeAnswerPicker() {
+  $('#answer-picker').classList.add('hidden');
+}
+
+$('#answer-confirm').addEventListener('click', async () => {
+  const { key, index } = answerPickerState;
+  closeAnswerPicker();
+  const result = await api('choose_answer', key, index);
+  if (!result.ok) toast(result.message || '选择未生效');
+});
+
+$('#answer-cancel').addEventListener('click', async () => {
+  const { key } = answerPickerState;
+  closeAnswerPicker();
+  await api('choose_answer', key, 0);
+});
 
 $('#log-toggle').addEventListener('click', () => {
   const body = $('#log-body');

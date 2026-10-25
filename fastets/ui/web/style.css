@@ -562,6 +562,24 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 .account-item b { display: block; font-size: var(--fs); }
 .account-item span { font-size: var(--fs-sm); color: var(--muted); }
 
+/* 复述 / 表达：挑一份示例答案 */
+.answer-modal { width: min(720px, 100%); }
+.answer-list { display: flex; flex-direction: column; gap: 10px; }
+.answer-item {
+  display: flex; gap: 11px; align-items: flex-start;
+  padding: 12px 14px; border: 1px solid var(--stroke-soft); border-radius: var(--r-sm);
+  background: rgba(var(--glass) / 0.32); cursor: pointer;
+  transition: border-color 0.18s ease, background 0.18s ease;
+}
+.answer-item:hover { border-color: var(--accent); background: var(--accent-soft); }
+.answer-item input { margin-top: 3px; accent-color: var(--accent); }
+.answer-body { min-width: 0; }
+.answer-head { font-size: var(--fs-sm); color: var(--muted); margin-bottom: 4px; }
+.answer-text {
+  margin: 0; font-size: var(--fs); line-height: 1.7; color: var(--text-2);
+  white-space: pre-wrap; word-break: break-word;
+}
+
 .badge {
   font-size: 11.5px; padding: 3px 10px; border-radius: 999px;
   background: var(--accent-soft); color: var(--accent); font-weight: 620;

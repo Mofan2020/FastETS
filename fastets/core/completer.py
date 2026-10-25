@@ -11,6 +11,7 @@ The flow per assignment is:
 from __future__ import annotations
 
 import json
+import random
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -18,7 +19,13 @@ from typing import Any, Callable, Dict, List, Optional
 import requests
 
 from .. import config
-from ..voice import ProviderError, VoiceProvider, build_provider, resolve_voice_id
+from ..voice import (
+    ProviderError,
+    VoiceProvider,
+    build_fallback_provider,
+    build_provider,
+    resolve_voice_id,
+)
 from . import audio as audio_mod
 from . import crypto, oss, paper as paper_mod, score as score_mod, zipcrypto
 from .ets_api import CODE_TOKEN_EXPIRED, EtsApiClient, EtsApiError
@@ -26,6 +33,30 @@ from .pacing import Pacer, pacer_from_settings
 from .session import Session
 
 ProgressCallback = Callable[[Dict[str, Any]], None]
+# The UI hands the completer a callback that asks the user to pick one of the
+# sample answers of a 复述 / 表达 question.
+AnswerChooser = Callable[[Dict[str, Any]], str]
+
+# ETS sometimes cannot reach its own marking service after the answer was
+# delivered.  The recording, the spx and the score XML are already stored, only
+# the score is missing, so the run retries and then reports the question as
+# "submitted, not confirmed" instead of a hard failure.
+MARK_RETRY_DELAY_SECONDS = 4
+_TRANSIENT_MARK_ERRORS = (
+    "远程获取ets服务失败",
+    "获取ets服务失败",
+    "服务繁忙",
+    "系统繁忙",
+    "服务暂时不可用",
+)
+
+
+def _is_transient_mark_error(exc: Exception) -> bool:
+    """True for the ETS errors that mean "the answer is in, the score is not"."""
+    if not isinstance(exc, EtsApiError):
+        return False
+    message = str(exc)
+    return any(marker in message for marker in _TRANSIENT_MARK_ERRORS)
 
 
 class CancelledError(RuntimeError):
@@ -60,11 +91,13 @@ class Completer:
         settings: Optional[Dict[str, Any]] = None,
         logger=None,
         progress: Optional[ProgressCallback] = None,
+        chooser: Optional[AnswerChooser] = None,
     ) -> None:
         self.session = session
         self.settings = settings if settings is not None else config.load_settings()
         self._log = logger
         self._progress_cb = progress
+        self._chooser = chooser
         self.pacer: Pacer = pacer_from_settings(self.settings)
         self._provider: Optional[VoiceProvider] = None
         self._audio = audio_mod.AudioTools(
@@ -96,6 +129,13 @@ class Completer:
     def _info(self, message: str, *args: Any) -> None:
         if self._log:
             self._log.info(message, *args)
+
+    def _warn_mark_once(self, reason: str) -> None:
+        """Tell the user once that ETS could not confirm a submitted answer."""
+        if getattr(self, "_mark_warned", False):
+            return
+        self._mark_warned = True
+        self._info("ETS 评分服务异常（答案已提交）: %s", reason)
 
     def _warn_speex_once(self, reason: str) -> None:
         """Tell the user once that the optional spx attachment is missing."""
@@ -329,6 +369,49 @@ class Completer:
         """The voice identifier that belongs to the active provider."""
         return resolve_voice_id(self.settings, provider)
 
+    def _fallback_provider(self) -> Optional[VoiceProvider]:
+        """The backup provider used when the configured one fails."""
+        if getattr(self, "_fallback", None) is not None:
+            return self._fallback
+        try:
+            self._fallback = build_fallback_provider(self.settings, logger=self._log)
+        except Exception as exc:  # noqa: BLE001 - the fallback is optional
+            self._info("备用语音服务不可用: %s", exc)
+            self._fallback = None
+        return self._fallback
+
+    def _synthesize(
+        self, text: str, label: str, question: paper_mod.Question
+    ) -> Any:
+        """Synthesise a text, falling back to the backup service if needed."""
+        speed = float(self.settings.get("tts_speed", 1.0) or 1.0)
+        pitch = int(self.settings.get("tts_pitch", 0) or 0)
+        try:
+            return self.provider.synthesize(
+                text,
+                voice_id=self._voice_for(self.provider),
+                speed=speed,
+                pitch=pitch,
+            )
+        except Exception as exc:  # noqa: BLE001 - the fallback may still work
+            fallback = self._fallback_provider()
+            if fallback is None:
+                raise
+            self._info(
+                "主语音服务失败，改用备用服务 %s: %s", fallback.name, exc
+            )
+            self._emit(
+                "warn",
+                f"主语音服务失败，改用备用服务（{fallback.name}）：{exc}",
+                group=question.group_name,
+            )
+            return fallback.synthesize(
+                text,
+                voice_id=self._voice_for(fallback),
+                speed=speed,
+                pitch=pitch,
+            )
+
     def _score_for(
         self, question: paper_mod.Question, segment_max: float, text: str, duration_ms: int
     ) -> float:
@@ -368,6 +451,7 @@ class Completer:
             "total": total_questions,
             "done": 0,
             "failed": 0,
+            "unconfirmed": 0,
             "items": [],
         }
 
@@ -396,6 +480,8 @@ class Completer:
                     )
                     report["items"].append(item)
                     report["done"] += 1
+                    if item.get("status") == "submitted-unconfirmed":
+                        report["unconfirmed"] += 1
                     completed += 1
                 except CancelledError:
                     raise
@@ -418,7 +504,12 @@ class Completer:
         self._emit(
             "done",
             f"作业「{report['homework_name']}」完成 {report['done']}/{report['total']}"
-            + (f"，失败 {report['failed']} 题" if report["failed"] else ""),
+            + (f"，失败 {report['failed']} 题" if report["failed"] else "")
+            + (
+                f"，{report['unconfirmed']} 题已提交但 ETS 评分未确认"
+                if report["unconfirmed"]
+                else ""
+            ),
             percent=100,
             report=report,
         )
@@ -436,7 +527,8 @@ class Completer:
         if question.is_choice:
             return self._complete_choice(token, question, per_question_max, label, dry_run)
 
-        segments = question.speech_segments()
+        override = self._chosen_answer_text(question, label)
+        segments = question.speech_segments(override)
         if not segments:
             return {
                 "group": question.group_name,
@@ -463,14 +555,57 @@ class Completer:
                     dry_run,
                 )
             )
+        unconfirmed = any(
+            item.get("status") == "submitted-unconfirmed" for item in results
+        )
         return {
             "group": question.group_name,
             "order": question.order,
             "kind": question.kind,
-            "status": "submitted",
+            "status": "submitted-unconfirmed" if unconfirmed else "submitted",
             "segments": results,
             "score": sum(item.get("score", 0.0) for item in results),
         }
+
+    def _chosen_answer_text(self, question: paper_mod.Question, label: str) -> str:
+        """Pick the sample answer that should be read out loud.
+
+        复述 / 表达 ship several sample answers in the resource pack.  The
+        setting decides which one is used: the first one, a random one, or
+        the one the user picks while the run is waiting.
+        """
+        candidates = list(question.answer_candidates or [])
+        if not candidates:
+            return ""
+        if len(candidates) == 1:
+            return candidates[0]
+
+        mode = str(self.settings.get("answer_pick_mode") or "first").strip().lower()
+        chosen = candidates[0]
+        if mode == "random":
+            chosen = random.choice(candidates)
+        elif mode == "manual" and self._chooser is not None:
+            try:
+                picked = self._chooser(
+                    {
+                        "key": f"{question.homework_id}:{question.id}",
+                        "label": label,
+                        "options": candidates,
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001 - never break the run
+                self._info("选择答案失败，改用第一个示例答案: %s", exc)
+                picked = None
+            if picked in candidates:
+                chosen = picked
+        try:
+            index = candidates.index(chosen)
+        except ValueError:
+            index = 0
+        self._info(
+            "朗读第 %d/%d 个示例答案：%s", index + 1, len(candidates), chosen[:40]
+        )
+        return chosen
 
     def _submit_audio_segment(
         self,
@@ -488,12 +623,7 @@ class Completer:
         self.pacer.reading(text)
 
         self._emit("tts", f"合成语音：{label}", group=question.group_name)
-        result = self.provider.synthesize(
-            text,
-            voice_id=self._voice_for(self.provider),
-            speed=float(self.settings.get("tts_speed", 1.0) or 1.0),
-            pitch=int(self.settings.get("tts_pitch", 0) or 0),
-        )
+        result = self._synthesize(text, label, question)
 
         raw_path = config.audio_cache_dir() / f"{crypto.random_hex(16)}.raw"
         raw_path.write_bytes(result.audio)
@@ -553,15 +683,56 @@ class Completer:
         context["correct"] = 1
 
         self.pacer.request()
-        self.client.submit_audio(
-            token=token,
-            context=context,
-            score=score_value,
-            score_detail=score_data.to_json(),
-            mp3_url=mp3["url"],
-            speex_url=speex_url,
-            xml_url=xml_result["url"],
-        )
+        mark_error: Optional[EtsApiError] = None
+        attempts = max(1, int(self.settings.get("mark_retries", 2) or 0) + 1)
+        for attempt in range(1, attempts + 1):
+            try:
+                self.client.submit_audio(
+                    token=token,
+                    context=context,
+                    score=score_value,
+                    score_detail=score_data.to_json(),
+                    mp3_url=mp3["url"],
+                    speex_url=speex_url,
+                    xml_url=xml_result["url"],
+                )
+                mark_error = None
+                break
+            except EtsApiError as exc:
+                if not _is_transient_mark_error(exc) or attempt >= attempts:
+                    mark_error = exc
+                    break
+                # The answer was delivered, only ETS' own marking service was
+                # unreachable.  Retrying the same entity/order is safe - the
+                # endpoint overwrites the record instead of duplicating it.
+                self._info(
+                    "ETS 评分服务暂时不可用（%s），%d 秒后重试（第 %d 次）",
+                    exc,
+                    MARK_RETRY_DELAY_SECONDS,
+                    attempt,
+                )
+                self._emit(
+                    "warn",
+                    f"ETS 评分服务暂时不可用，{MARK_RETRY_DELAY_SECONDS} 秒后重试",
+                    group=question.group_name,
+                )
+                time.sleep(MARK_RETRY_DELAY_SECONDS)
+
+        unconfirmed = False
+        if mark_error is not None:
+            if not _is_transient_mark_error(mark_error):
+                raise mark_error
+            # The audio, the spx and the score XML are on the server; only the
+            # score could not be computed.  Reporting this as a failed question
+            # would be wrong, so it is reported as "submitted, not confirmed".
+            unconfirmed = True
+            self._warn_mark_once(str(mark_error))
+            self._emit(
+                "warn",
+                f"{label} 已提交，但 ETS 评分服务返回错误：{mark_error}"
+                "（答案已上传，可在官方 App 里确认是否记录）",
+                group=question.group_name,
+            )
 
         if not self.settings.get("keep_audio_cache", True):
             _cleanup(raw_path, mp3_path, xml_path, speex_path)
@@ -570,12 +741,13 @@ class Completer:
 
         return {
             "index": segment_index,
-            "status": "submitted",
+            "status": "submitted-unconfirmed" if unconfirmed else "submitted",
             "score": float(score_value),
             "duration_ms": duration_ms,
             "text": text[:80],
             "mp3_url": mp3["url"],
             "speex_uploaded": bool(speex_url),
+            "message": str(mark_error) if unconfirmed else "",
         }
 
     def _complete_choice(

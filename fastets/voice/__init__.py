@@ -9,12 +9,17 @@ FastETS ships three interchangeable providers:
                    GPT-SoVITS / CosyVoice / IndexTTS that expose a voice name.
 ``edge``           Microsoft Edge TTS. No API key, no cloning - a free fallback
                    so the tool still works out of the box.
+``macos``          The voices that ship with macOS (``say``). No account, no
+                   network - the last resort on a Mac.
 """
 
 from __future__ import annotations
 
+from typing import Any, Dict, List, Optional
+
 from .base import CloneResult, ProviderError, TTSResult, VoiceProvider
 from .edge import EdgeTTSProvider
+from .mac_say import DEFAULT_MAC_VOICE, MacSayProvider
 from .minimax import DEFAULT_BASE_URL as DEFAULT_MINIMAX_BASE_URL
 from .minimax import MiniMaxProvider
 from .openai_compat import OpenAICompatProvider
@@ -27,9 +32,13 @@ __all__ = [
     "MiniMaxProvider",
     "OpenAICompatProvider",
     "EdgeTTSProvider",
+    "MacSayProvider",
     "build_provider",
+    "build_fallback_provider",
     "resolve_voice_id",
     "DEFAULT_MINIMAX_VOICE",
+    "DEFAULT_EDGE_VOICE",
+    "DEFAULT_MAC_VOICE",
     "PROVIDER_NAMES",
 ]
 
@@ -37,6 +46,7 @@ PROVIDER_NAMES = {
     "minimax": "MiniMax 声音克隆 + T2A",
     "openai_compat": "OpenAI 兼容接口",
     "edge": "Microsoft Edge TTS（免密钥）",
+    "macos": "macOS 系统朗读（免密钥，仅 macOS）",
 }
 
 # A built in MiniMax system voice, used when the user does not want to clone
@@ -65,6 +75,8 @@ def resolve_voice_id(settings: dict, provider: VoiceProvider) -> str:
         voice = str(settings.get("openai_voice") or "")
     elif provider.name == "edge":
         voice = str(settings.get("edge_voice") or "")
+    elif provider.name == "macos":
+        voice = str(settings.get("macos_voice") or "")
     else:
         voice = str(settings.get("minimax_voice_id") or "")
     if voice:
@@ -76,6 +88,8 @@ def resolve_voice_id(settings: dict, provider: VoiceProvider) -> str:
         return DEFAULT_OPENAI_VOICE
     if provider.name == "edge":
         return DEFAULT_EDGE_VOICE
+    if provider.name == "macos":
+        return DEFAULT_MAC_VOICE
     return DEFAULT_MINIMAX_VOICE
 
 
@@ -105,4 +119,32 @@ def build_provider(settings: dict, logger=None) -> VoiceProvider:
         return EdgeTTSProvider(
             voice=str(settings.get("edge_voice") or "en-US-AriaNeural"), logger=logger
         )
+    if name in ("macos", "mac", "say", "macos_say"):
+        return MacSayProvider(
+            voice=str(settings.get("macos_voice") or DEFAULT_MAC_VOICE), logger=logger
+        )
     raise ProviderError(f"未知的语音服务: {name}")
+
+
+def build_fallback_provider(settings: dict, logger=None) -> Optional[VoiceProvider]:
+    """The provider that takes over when the configured one fails.
+
+    ``tts_fallback`` picks it: ``macos`` uses the voices that ship with
+    macOS, ``edge`` uses Microsoft Edge TTS and ``none`` disables the
+    fallback.  It returns ``None`` when the fallback is not usable here.
+    """
+    settings = settings or {}
+    name = str(settings.get("tts_fallback") or "").strip().lower()
+    if name in ("", "none", "off", "关闭"):
+        return None
+    if name in ("macos", "mac", "say", "macos_say"):
+        if not MacSayProvider.available():
+            return None
+        return MacSayProvider(
+            voice=str(settings.get("macos_voice") or DEFAULT_MAC_VOICE), logger=logger
+        )
+    if name == "edge":
+        return EdgeTTSProvider(
+            voice=str(settings.get("edge_voice") or "en-US-AriaNeural"), logger=logger
+        )
+    return None

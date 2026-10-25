@@ -145,6 +145,7 @@ class Question:
         original_text: str = "",
         max_score: float = 5.0,
         read_text: str = "",
+        answer_candidates: Optional[List[str]] = None,
     ) -> None:
         self.id = question_id
         self.homework_id = homework_id
@@ -160,6 +161,9 @@ class Question:
         self.original_text = original_text
         self.max_score = max_score
         self.read_text = read_text
+        # 复述 / 表达这类题型在资源包里带多份「示例答案」，朗读时需要从
+        # 里面挑一份（第一个 / 随机 / 手动选择）。
+        self.answer_candidates = [c for c in (answer_candidates or []) if c]
 
     # -- classification -----------------------------------------------------
 
@@ -197,15 +201,17 @@ class Question:
             return "听选信息"
         return name or "其他"
 
-    def speech_segments(self) -> List[str]:
+    def speech_segments(self, text: str = "") -> List[str]:
         """The text that has to be spoken, split into segments.
 
         The official client records one clip per sentence for 跟读 / 朗读, while
-        短文朗读 and 信息转述 are submitted as a single recording.
+        短文朗读 and 信息转述 are submitted as a single recording.  ``text``
+        overrides the parsed text, which is how 复述 / 表达 read one of the
+        sample answers instead of the source material.
         """
         if self.is_choice:
             return []
-        text = self.read_text or self.original_text or self.question_text
+        text = text or self.read_text or self.original_text or self.question_text
         if not text:
             return []
         kind = self.kind
@@ -234,6 +240,7 @@ class Question:
             "read_text": self.read_text,
             "max_score": self.max_score,
             "needs_audio": self.needs_audio,
+            "answer_candidates": self.answer_candidates,
             "context": self.context,
         }
 
@@ -417,6 +424,7 @@ def parse_content_json(
                 structure_type=structure_type,
                 question_text=clean_text(info.get("topic")) or group_name,
                 answers=answers,
+                answer_candidates=list(answers),
                 context=_make_context(payload, homework_id, order, context_base),
                 original_text=read_text,
                 max_score=max_score,

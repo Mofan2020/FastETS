@@ -136,7 +136,8 @@ def disclaimer_path() -> Path:
 
 DEFAULT_SETTINGS: Dict[str, Any] = {
     # voice / TTS
-    "tts_provider": "minimax",       # minimax | edge | openai_compat
+    "tts_provider": "minimax",       # minimax | edge | openai_compat | macos
+    "tts_fallback": "macos",         # macos | edge | none - used when the main one fails
     "voice_mode": "clone",           # clone | default
     "default_voice": "",             # voice id used when voice_mode == default
     "minimax_api_key": "",
@@ -147,14 +148,19 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "tts_speed": 1.0,
     "tts_pitch": 0,
     "edge_voice": "en-US-AriaNeural",
+    "macos_voice": "Samantha",
     "openai_base_url": "",
     "openai_api_key": "",
     "openai_model": "tts-1",
     "openai_voice": "alloy",
     "openai_clone_endpoint": "",
+    # 复述 / 表达：资源包里有多份示例答案，朗读时挑哪一份
+    "answer_pick_mode": "first",     # first | random | manual
     # scoring
     "score_mode": "target",           # target | estimate
     "target_score_ratio": 1.0,        # fraction of the part maximum when score_mode == target
+    # ETS 评分服务异常时的重试次数（答案已送达，只是分数没算出来）
+    "mark_retries": 2,
     # runtime
     "ffmpeg_path": "",
     "dry_run": True,
