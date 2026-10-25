@@ -572,12 +572,14 @@ def test_completer_offline() -> None:
         check("submission carries the score detail", bool(item.get("score_detail")))
 
 
-def test_serial_id_per_pack() -> None:
-    """Every recording inside one resource pack needs its own serial id.
+def test_item_number_restarts_per_pack() -> None:
+    """The item number of an answer restarts with every resource pack.
 
-    The server keys an answer record by "pack + item number".  When several
-    questions of the same pack reuse one number, they are merged into a
-    single record and the assignment stops at e.g. 75%.
+    The server identifies an answer by "pack + item number".  Sending the
+    paper-wide number makes the server drop the answers of every pack that
+    is not the first one of its group - the assignment then stays at e.g.
+    75% no matter how many times it is submitted.  This is the bug that
+    kept the real assignment at 9 of 12 answers.
     """
     from fastets.core import paper as paper_mod
     from fastets.core.completer import LoadedPaper
@@ -587,43 +589,79 @@ def test_serial_id_per_pack() -> None:
         return
     completer, submitted, _uploaded, restore = offline
 
-    def make(order: int, entity: str, group: str) -> paper_mod.Question:
-        return paper_mod.Question(
-            question_id=f"q{entity}-{order}",
-            homework_id="h1",
-            content_url="",
-            order=order,
-            group_name=group,
-            structure_type="collector.dialogue",
-            question_text="Ask something.",
-            answers=["Answer one."],
-            context={"homework_id": "h1", "set_id": "s1", "entity_id": entity},
-            max_score=5.0,
+    sections = []
+    # Three packs of the same 大题, one question each - the shape of 朗读词组.
+    for index in range(3):
+        section = paper_mod.parse_content_json(
+            {
+                "structure_type": "collector.read",
+                "info": {"value": f"Word number {index}."},
+            },
+            "h1",
+            f"/pack{index}.zip",
+            "朗读词组",
         )
-
-    # One pack with three questions, then a second pack with one question.
-    first = paper_mod.Section(
+        for question in section.questions:
+            question.context["entity_id"] = f"e{index}"
+        sections.append(section)
+    # One pack with five questions - the shape of 交际应答.
+    dialogue = paper_mod.parse_content_json(
+        {
+            "structure_type": "collector.dialogue",
+            "info": {
+                "question": [
+                    {
+                        "xh": number,
+                        "ask": f"Ask {number}?",
+                        "std": [{"value": f"Answer {number}."}],
+                    }
+                    for number in range(1, 6)
+                ]
+            },
+        },
+        "h1",
+        "/dialogue.zip",
         "交际应答",
-        "collector.dialogue",
-        [make(1, "e1", "交际应答"), make(2, "e1", "交际应答"), make(3, "e1", "交际应答")],
     )
-    second = paper_mod.Section("朗读句子", "collector.read", [make(4, "e2", "朗读句子")])
-    paper = LoadedPaper({"id": "h1", "name": "测试作业"}, [first, second])
+    for question in dialogue.questions:
+        question.context["entity_id"] = "d"
+    sections.append(dialogue)
+
+    paper = LoadedPaper({"id": "h1", "name": "测试作业"}, sections)
     try:
         completer.complete_homework({"id": "h1", "name": "测试作业"}, paper=paper, dry_run=False)
     finally:
         restore()
 
-    serials = [
-        str((item.get("context") or {}).get("serial_id"))
+    rows = [
+        (
+            str((item.get("context") or {}).get("entity_id")),
+            str((item.get("context") or {}).get("order")),
+            str((item.get("context") or {}).get("serial_id")),
+        )
         for item in submitted
         if "context" in item
     ]
-    check("one submission per question", len(serials) == 4, str(serials))
+    check("one submission per question", len(rows) == 8, str(rows))
     check(
-        "serial ids restart per pack and stay unique inside it",
-        serials == ["0", "1", "2", "0"],
-        str(serials),
+        "every pack sends its own item numbers",
+        rows
+        == [
+            ("e0", "1", "0"),
+            ("e1", "1", "0"),
+            ("e2", "1", "0"),
+            ("d", "1", "0"),
+            ("d", "2", "0"),
+            ("d", "3", "0"),
+            ("d", "4", "0"),
+            ("d", "5", "0"),
+        ],
+        str(rows),
+    )
+    check(
+        "the paper wide number is not sent",
+        all(order != "2" for entity, order, _serial in rows[:3]),
+        str(rows[:3]),
     )
 
 
@@ -1630,7 +1668,7 @@ def main() -> int:
         test_credential_migration,
         test_stop_cancels_the_run,
         test_completer_offline,
-        test_serial_id_per_pack,
+        test_item_number_restarts_per_pack,
         test_response_candidates,
         test_generic_item_splitting,
         test_log_redaction,

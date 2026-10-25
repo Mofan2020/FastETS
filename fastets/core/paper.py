@@ -268,6 +268,7 @@ class Question:
         read_text: str = "",
         answer_candidates: Optional[List[str]] = None,
         single_recording: bool = False,
+        pack_order: int = 1,
     ) -> None:
         self.id = question_id
         self.homework_id = homework_id
@@ -291,6 +292,11 @@ class Question:
         # into sentences (that would create several records for one
         # question and the completion would never reach 100%).
         self.single_recording = bool(single_recording)
+        # The position of the question **inside its own resource pack** (1
+        # based).  The server identifies an answer by "pack + item number",
+        # and the item number restarts with every pack - see
+        # ``docs/API.md``.
+        self.pack_order = int(pack_order or 1)
 
     # -- classification -----------------------------------------------------
 
@@ -439,12 +445,14 @@ def parse_content_json(
         read_text: str = "",
         suffix: str = "",
     ) -> Question:
-        order = order_offset + local_order(index, entry)
+        local = local_order(index, entry)
+        order = order_offset + local
         return Question(
             question_id=_question_id(homework_id, content_url, order, suffix),
             homework_id=homework_id,
             content_url=content_url,
             order=order,
+            pack_order=local,
             group_name=group_name,
             structure_type=structure_type,
             question_text=question_text,
@@ -491,7 +499,8 @@ def parse_content_json(
         entries = info.get("std") or []
         for index, raw in enumerate(entries):
             entry = raw if isinstance(raw, dict) else {}
-            order = order_offset + local_order(index, entry)
+            local = local_order(index, entry)
+            order = order_offset + local
             answer = clean_text(entry.get("value"))
             questions.append(
                 Question(
@@ -499,6 +508,7 @@ def parse_content_json(
                     homework_id=homework_id,
                     content_url=content_url,
                     order=order,
+                    pack_order=local,
                     group_name=group_name,
                     structure_type=structure_type,
                     question_text=clean_text(entry.get("xth")) or f"第 {order} 题",
@@ -521,7 +531,8 @@ def parse_content_json(
         )
         for index, raw in enumerate(entries):
             entry = raw if isinstance(raw, dict) else {}
-            order = local_order(index, entry)
+            local = local_order(index, entry)
+            order = local
             answers = []
             for item in entry.get("std") or []:
                 value = clean_text(item.get("value") if isinstance(item, dict) else item)
@@ -541,6 +552,7 @@ def parse_content_json(
                     homework_id=homework_id,
                     content_url=content_url,
                     order=order_offset + order,
+                    pack_order=local,
                     group_name=group_name,
                     structure_type=structure_type,
                     question_text=question_text,
@@ -570,6 +582,7 @@ def parse_content_json(
                 homework_id=homework_id,
                 content_url=content_url,
                 order=order,
+                pack_order=1,
                 group_name=group_name,
                 structure_type=structure_type,
                 question_text=clean_text(info.get("topic")) or group_name,
@@ -604,6 +617,7 @@ def parse_content_json(
                     homework_id=homework_id,
                     content_url=content_url,
                     order=order,
+                    pack_order=number,
                     group_name=group_name,
                     structure_type=structure_type,
                     question_text=prompt or text,
@@ -628,6 +642,7 @@ def parse_content_json(
             homework_id=homework_id,
             content_url=content_url,
             order=order,
+            pack_order=1,
             group_name=group_name,
             structure_type=structure_type,
             question_text=group_name,

@@ -101,9 +101,6 @@ class Completer:
         self._progress_cb = progress
         self._chooser = chooser
         self._cancel_event = cancel_event
-        # The server keys an answer record by "resource pack + item number".
-        # The counter restarts for every pack (one section = one pack).
-        self._serial_cursor = 0
         self.pacer: Pacer = pacer_from_settings(self.settings, stop_event=cancel_event)
         self._provider: Optional[VoiceProvider] = None
         self._audio = audio_mod.AudioTools(
@@ -535,7 +532,6 @@ class Completer:
         completed = 0
         for section_index, section in enumerate(paper.sections):
             self._check_cancel()
-            self._serial_cursor = 0
             if section_index > 0:
                 self.pacer.section()
             section_max = paper_mod.part_max_score(section.group_name)
@@ -685,18 +681,6 @@ class Completer:
         )
         return chosen
 
-    def _next_serial_id(self) -> str:
-        """The item number of the next recording inside the current pack.
-
-        The server keys an answer record by "resource pack + item number".
-        Every recording of one pack therefore needs its own number - otherwise
-        several questions are merged into a single record and the assignment
-        never reaches 100%.
-        """
-        serial = str(self._serial_cursor)
-        self._serial_cursor += 1
-        return serial
-
     def _submit_audio_segment(
         self,
         token: str,
@@ -767,8 +751,15 @@ class Completer:
         )
 
         context = dict(question.context)
-        context["order"] = str(question.order)
-        context["serial_id"] = self._next_serial_id()
+        # The server identifies an answer by "resource pack + item number".
+        # The item number is the position **inside the pack**, so it restarts
+        # with every pack - it is not the running number of the whole paper.
+        # Sending the paper-wide number makes the server drop the answer:
+        # the assignment then stays at e.g. 75% forever.
+        context["order"] = str(question.pack_order)
+        # The clip inside the question (逐句跟读 sends one record per
+        # sentence, so the clip index is the second part of the key).
+        context["serial_id"] = str(segment_index)
         # The official client reports how long the answer took (in seconds).
         # A zero here makes the server treat the answer as "not practised".
         context["use_time"] = max(1, int(round((duration_ms or 0) / 1000.0)))
