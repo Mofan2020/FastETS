@@ -164,9 +164,12 @@ class _MacKeychain:
         """The binary that is allowed to read the keychain item."""
         return str(Path(sys.executable).resolve())
 
-    def _keychain_password(self) -> bytes:
+    def _keychain_password(self, create: bool = True) -> bytes:
+        """The random password of the dedicated keychain."""
         sidecar = self.path.with_name(KEYCHAIN_PASSWORD_FILE)
         if not sidecar.exists():
+            if not create:
+                return b""
             password = secrets.token_hex(32).encode("ascii")
             sidecar.write_bytes(password)
             _chmod(sidecar)
@@ -203,7 +206,9 @@ class _MacKeychain:
         status = lib["sec"].SecKeychainOpen(str(self.path).encode(), ctypes.byref(keychain))
         if status != 0:
             raise CredentialError(f"keychain open failed (OSStatus {status})")
-        password = self._keychain_password()
+        password = self._keychain_password(create=False)
+        if not password:
+            raise CredentialError("keychain password file missing")
         unlock = lib["sec"].SecKeychainUnlock(
             keychain, len(password), ctypes.cast(password, c_void_p), True
         )
@@ -357,7 +362,13 @@ class _WindowsDpapi:
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
 
-    def _protect(self, data: bytes) -> bytes:
+    @staticmethod
+    def _libraries():
+        """The DPAPI entry points with explicit signatures.
+
+        Without ``argtypes`` ctypes assumes plain ``int`` arguments, which
+        overflows on 64 bit Windows as soon as a pointer is passed.
+        """
         import ctypes
         from ctypes import POINTER, c_uint32, c_void_p
 
@@ -366,6 +377,33 @@ class _WindowsDpapi:
 
         crypt = ctypes.cdll.LoadLibrary("Crypt32.dll")
         kernel = ctypes.cdll.LoadLibrary("Kernel32.dll")
+        crypt.CryptProtectData.argtypes = [
+            POINTER(DATA_BLOB),
+            c_void_p,
+            c_void_p,
+            c_void_p,
+            c_void_p,
+            c_uint32,
+            POINTER(DATA_BLOB),
+        ]
+        crypt.CryptProtectData.restype = ctypes.c_int32
+        crypt.CryptUnprotectData.argtypes = [
+            POINTER(DATA_BLOB),
+            c_void_p,
+            c_void_p,
+            c_void_p,
+            c_void_p,
+            c_uint32,
+            POINTER(DATA_BLOB),
+        ]
+        crypt.CryptUnprotectData.restype = ctypes.c_int32
+        kernel.LocalFree.argtypes = [c_void_p]
+        kernel.LocalFree.restype = c_void_p
+        return ctypes, DATA_BLOB, crypt, kernel
+
+    def _protect(self, data: bytes) -> bytes:
+        ctypes, DATA_BLOB, crypt, kernel = self._libraries()
+        c_void_p = ctypes.c_void_p
         source = DATA_BLOB(len(data), ctypes.cast(ctypes.create_string_buffer(data), c_void_p))
         result = DATA_BLOB()
         description = ctypes.create_unicode_buffer("FastETS")
@@ -385,14 +423,8 @@ class _WindowsDpapi:
             kernel.LocalFree(result.pbData)
 
     def _unprotect(self, data: bytes) -> bytes:
-        import ctypes
-        from ctypes import POINTER, c_uint32, c_void_p
-
-        class DATA_BLOB(ctypes.Structure):
-            _fields_ = [("cbData", c_uint32), ("pbData", c_void_p)]
-
-        crypt = ctypes.cdll.LoadLibrary("Crypt32.dll")
-        kernel = ctypes.cdll.LoadLibrary("Kernel32.dll")
+        ctypes, DATA_BLOB, crypt, kernel = self._libraries()
+        c_void_p = ctypes.c_void_p
         source = DATA_BLOB(len(data), ctypes.cast(ctypes.create_string_buffer(data), c_void_p))
         result = DATA_BLOB()
         if not crypt.CryptUnprotectData(
