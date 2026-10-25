@@ -78,31 +78,32 @@ jobs:
       - name: Package macOS
         if: runner.os == 'macOS'
         run: |
+          set -euo pipefail
+          rm -rf dist-pkg
           mkdir -p dist-pkg
-          APP="dist/FastETS.app"
-          if [ -d "$APP" ]; then
-            cp -R "$APP" dist-pkg/
-            cd dist-pkg && zip -r "../${{ matrix.artifact }}.zip" "FastETS.app" -x '*.DS_Store'
+          if [ -d "dist/FastETS.app" ]; then
+            cp -R "dist/FastETS.app" "dist-pkg/"
+            ( cd dist-pkg && zip -r "${{ matrix.artifact }}.zip" "FastETS.app" -x '*.DS_Store' )
           else
-            zip -r "../${{ matrix.artifact }}.zip" dist/FastETS
+            ( cd dist && zip -r "../dist-pkg/${{ matrix.artifact }}.zip" "FastETS" )
           fi
+          ls -la dist-pkg
 
       - name: Package Windows
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Compress-Archive -Path dist/FastETS/* -DestinationPath "${{ matrix.artifact }}.zip"
+          $ErrorActionPreference = "Stop"
+          if (Test-Path dist-pkg) { Remove-Item -Recurse -Force dist-pkg }
           New-Item -ItemType Directory -Force -Path dist-pkg | Out-Null
-          Move-Item -Force "${{ matrix.artifact }}.zip" dist-pkg/
+          Compress-Archive -Path dist/FastETS/* -DestinationPath "dist-pkg/${{ matrix.artifact }}.zip"
+          Get-ChildItem dist-pkg | Format-Table Name, Length
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: |
-            dist-pkg/${{ matrix.artifact }}.zip
-            dist/FastETS.app
-            dist/FastETS
+          path: dist-pkg/${{ matrix.artifact }}.zip
           if-no-files-found: error
           retention-days: 30
 
@@ -131,12 +132,16 @@ jobs:
         run: pyinstaller --noconfirm --clean packaging/FastETS.spec
       - name: Package
         run: |
-          cd dist
-          zip -r "../FastETS-macOS-x64.zip" "FastETS.app" -x '*.DS_Store'
+          set -euo pipefail
+          rm -rf dist-pkg
+          mkdir -p dist-pkg
+          cp -R dist/FastETS.app dist-pkg/
+          ( cd dist-pkg && zip -r "FastETS-macOS-x64.zip" "FastETS.app" -x '*.DS_Store' )
+          ls -la dist-pkg
       - uses: actions/upload-artifact@v4
         with:
           name: FastETS-macOS-x64
-          path: dist/FastETS-macOS-x64.zip
+          path: dist-pkg/FastETS-macOS-x64.zip
           if-no-files-found: warn
           retention-days: 30
 
@@ -154,9 +159,14 @@ jobs:
 
       - name: Collect archives
         run: |
+          set -euo pipefail
+          rm -rf release-assets
           mkdir -p release-assets
-          find artifacts -name "*.zip" -exec cp {} release-assets/ \;
+          # Only our own named archives - never PyInstaller internals such as
+          # base_library.zip that live inside the bundled application.
+          find artifacts -type f -name 'FastETS-*.zip' -exec cp {} release-assets/ \;
           ls -la release-assets
+          test -n "$(ls -A release-assets)" || { echo "no archives collected"; exit 1; }
 
       - name: Publish GitHub pre-release
         uses: softprops/action-gh-release@v2
