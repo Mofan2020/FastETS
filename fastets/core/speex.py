@@ -69,7 +69,13 @@ def encode_with_helper(
     ffmpeg decodes the input into mono 16 bit PCM (the same sample format
     ffmpeg's own libspeex encoder uses), the helper turns that PCM into Speex
     frames.  The result is byte identical to what ffmpeg's ``libspeex``
-    encoder produces.
+    encoder produces (same libspeex source, same quality / complexity /
+    CBR settings, tail frame zero padded like ffmpeg's audio FIFO does).
+
+    The bit for bit comparison was measured on macOS arm64.  On x86_64 the
+    fused multiply-add instructions make a few quantiser decisions differ, so
+    the frames are equivalent but not identical there; the stream stays a
+    valid Speex stream of the same quality.
     """
     helper = find_helper()
     if not helper:

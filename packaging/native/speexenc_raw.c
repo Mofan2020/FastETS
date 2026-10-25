@@ -20,8 +20,15 @@
  *   - input:  mono signed 16 bit little endian PCM (as ffmpeg's
  *             AV_SAMPLE_FMT_S16 encoder input)
  *   - encode: speex_encode_int() with the same quality / complexity defaults
+ *             (quality 8, CBR, complexity 3, 320 samples per frame)
+ *   - tail:   the last, incomplete frame is zero padded instead of dropped,
+ *             just like ffmpeg's audio FIFO does
  *   - output: the raw Speex frames, i.e. exactly what ffmpeg's Ogg Speex
  *             muxer would have put into the Ogg packets
+ *
+ * The build script compiles libspeex without auto vectorisation: at -O2
+ * clang vectorises some of libspeex's floating point loops, which changes
+ * the rounding and therefore the encoded bits.
  *
  * Usage
  * -----
@@ -161,9 +168,10 @@ static int run_encode(int rate, int quality, int vbr, double vbr_quality,
     while ((got = fread(pcm, sizeof(spx_int16_t), (size_t)frame_size, stdin)) > 0) {
         int n;
         if (got < (size_t)frame_size) {
-            /* ffmpeg's encoder never emits an incomplete frame, so the
-               trailing partial frame is dropped here as well. */
-            break;
+            /* ffmpeg's audio FIFO hands the encoder a zero padded last
+               frame instead of dropping the tail, so the encoder sees the
+               same samples and emits the same extra frame. */
+            memset(pcm + got, 0, ((size_t)frame_size - got) * sizeof(spx_int16_t));
         }
         n = encode_frame(state, pcm, out, (int)sizeof(out), &bits);
         if (n > 0) {

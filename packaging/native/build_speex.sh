@@ -125,7 +125,19 @@ CONFIG_TYPES
 
 # The same defines ffmpeg uses when it builds libspeex: floating point
 # arithmetic and the KISS FFT backend.
+#
+# The vectorisation switches matter: at -O2 clang auto-vectorises some of
+# libspeex's floating point loops, which changes the rounding and therefore
+# the encoded bits.  ffmpeg's own libspeex build does not vectorise them, so
+# the frames FastETS produces would differ from the ones ffmpeg produces.
+# Disabling the vectorisers makes the output byte identical to ffmpeg's
+# libspeex encoder (verified against ffmpeg 5.1 on macOS arm64).
 CFLAGS="-O2 -fPIC -DFLOATING_POINT -DEXPORT= -DUSE_KISS_FFT"
+PROBE_SRC="$WORK/flag_probe.c"
+printf 'int main(void){return 0;}\n' > "$PROBE_SRC"
+if "$CC" $CFLAGS -fno-vectorize -fno-slp-vectorize -c "$PROBE_SRC" -o "$WORK/flag_probe.o" 2>/dev/null; then
+    CFLAGS="$CFLAGS -fno-vectorize -fno-slp-vectorize"
+fi
 OBJECTS=""
 
 for source in "$SRC"/libspeex/*.c; do

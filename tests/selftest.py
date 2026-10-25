@@ -657,6 +657,126 @@ def test_config() -> None:
     check("voice mode default", config.DEFAULT_SETTINGS.get("voice_mode") == "clone")
 
 
+def test_speex_matches_ffmpeg() -> None:
+    """The bundled helper must produce the very same frames as ffmpeg's
+    libspeex encoder.
+
+    The ETS100 cloud stores every answer twice (mp3 + raw Speex).  The
+    official client builds the Speex payload with ffmpeg's ``libspeex``
+    encoder, so FastETS has to produce the same bytes.  The comparison needs
+    an ffmpeg that still ships the libspeex encoder (removed in ffmpeg 6.0);
+    when none is around the test is skipped.
+    """
+    from fastets.core import audio as audio_mod
+    from fastets.core import speex as speex_mod
+
+    helper = speex_mod.find_helper()
+    if not helper:
+        print("[SKIP] speex vs ffmpeg  -> 没有内置 Speex 编码器")
+        return
+
+    tools = audio_mod.AudioTools()
+    candidates = [tools.ffmpeg]
+    candidates += sorted(str(p) for p in Path("/opt/homebrew/opt").glob("ffmpeg@*/bin/ffmpeg"))
+    candidates += sorted(str(p) for p in Path("/usr/local/bin").glob("ffmpeg*"))
+
+    reference = None
+    for candidate in candidates:
+        if not candidate or not Path(candidate).exists():
+            continue
+        probe = subprocess.run(
+            [candidate, "-hide_banner", "-encoders"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if "libspeex" in (probe.stdout or ""):
+            reference = candidate
+            break
+    if not reference:
+        print("[SKIP] speex vs ffmpeg  -> 找不到带 libspeex 编码器的 ffmpeg")
+        return
+
+    source = config.audio_cache_dir() / "selftest_compare.s16"
+    subprocess.run(
+        [
+            reference,
+            "-y",
+            "-v",
+            "quiet",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=330:duration=2:sample_rate=16000",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-f",
+            "s16le",
+            str(source),
+        ],
+        check=False,
+    )
+    if not source.exists():
+        print("[SKIP] speex vs ffmpeg  -> 无法生成测试音频")
+        return
+    pcm = source.read_bytes()
+
+    # ffmpeg writes an Ogg Speex stream; the raw frames are what we compare.
+    ogg_target = config.audio_cache_dir() / "selftest_compare.spx"
+    subprocess.run(
+        [
+            reference,
+            "-y",
+            "-v",
+            "quiet",
+            "-f",
+            "s16le",
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            "-i",
+            str(source),
+            "-c:a",
+            "libspeex",
+            "-cbr_quality",
+            "8",
+            str(ogg_target),
+        ],
+        check=False,
+    )
+    if not ogg_target.exists():
+        print("[SKIP] speex vs ffmpeg  -> ffmpeg 无法编码 Speex")
+        return
+    expected = audio_mod.extract_raw_speex_from_ogg(ogg_target.read_bytes())
+
+    target = config.audio_cache_dir() / "selftest_compare.speex"
+    encoded = subprocess.run(
+        [helper, "--rate", "16000", "--quality", "8"],
+        input=pcm,
+        capture_output=True,
+        check=False,
+    )
+    payload = encoded.stdout
+    check("helper produced frames", len(payload) > 0, f"{len(payload)} bytes")
+    check(
+        "helper output is byte identical to ffmpeg's libspeex",
+        payload == expected,
+        f"ours {len(payload)} B vs ffmpeg {len(expected)} B",
+    )
+
+    # And it has to be reproducible.
+    again = subprocess.run(
+        [helper, "--rate", "16000", "--quality", "8"],
+        input=pcm,
+        capture_output=True,
+        check=False,
+    ).stdout
+    check("helper output is deterministic", again == payload)
+
+
 def main() -> int:
     for fn in (
         test_envelope,
@@ -671,6 +791,7 @@ def main() -> int:
         test_audio_pipeline,
         test_submit_payload,
         test_speex_frames,
+        test_speex_matches_ffmpeg,
         test_completer_offline,
         test_config,
         test_live_api,

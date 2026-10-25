@@ -55,7 +55,7 @@ ffmpeg 与 Speex 编码器已随包附带，无需另外安装。macOS 解压后
 ## v1.0.1 修复内容
 
 - **提交作业彻底修好**：上一版每一道题都会失败，根因是 ffmpeg 6.0 起删除了 `libspeex` 编码器，随包附带的 ffmpeg 根本产不出 ETS100 需要的 `spx` 附件。
-  现在 FastETS 自带一个静态链接 libspeex 的小工具（`speexenc_raw`），产出的帧与 ffmpeg 5.x 的 `libspeex` **逐字节相同**（已实测比对 100 帧完全一致）。
+  现在 FastETS 自带一个静态链接 libspeex 1.2.1 的小工具（`speexenc_raw`），产出的帧与 ffmpeg 5.x 的 `libspeex` **逐字节相同**：同一份 libspeex 源码、同样的 `quality=8` / CBR / `complexity=3` / 每帧 320 采样，末帧同样补零，编译时关闭自动向量化以对齐 ffmpeg 的浮点结果。实测一段 17 秒录音（852 帧 / 59640 字节）与 ffmpeg 5.1 的 sha256 完全一致；自检里也有一条 `test_speex_matches_ffmpeg`，本机存在带 `libspeex` 的 ffmpeg 时会自动逐字节比对。
   万一该工具缺失，提交**不再中断**：会省略 spx 附件，mp3 与评测 XML 照常上传，分数不受影响，并在日志里给出明确提示。
 - **日志不再刷 `[object Object]`**：进度事件以前把整个对象塞进了 message，现在统一归一化成文本，并带上阶段标签（下载 / 合成 / 上传 / 回传 / 克隆 …）。
 - **声音克隆不再「没有音频数据」**：取消麦克风录制，改为导入音频文件；导入后立刻探测并显示格式、时长、采样率与平均音量，文件太小、无法识别、录到静音都会给出具体原因；上游报错会带上 MiniMax 的 `trace_id` 与原始响应。

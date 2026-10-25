@@ -119,8 +119,6 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": "FastETS",
             "CFBundleDisplayName": "FastETS",
-            "NSMicrophoneUsageDescription": "FastETS 需要使用麦克风录制朗读样本，用于克隆你自己的声音。录音只保存在本机。",
-            "NSCameraUsageDescription": "FastETS 不使用摄像头。",
             "LSMinimumSystemVersion": "10.15",
             "NSHighResolutionCapable": True,
             "CFBundleShortVersionString": "1.0.1",
