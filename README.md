@@ -156,7 +156,7 @@ python -m compileall -q fastets
 ./packaging/icon/make_icon.py             # 重新生成应用图标（需要 Pillow）
 ```
 
-CI 在每次 push / PR 上跑 `ubuntu / macos / windows` 三套自检；打 `v*` tag 会触发 Release 工作流，测试通过后构建 macOS 与 Windows 安装包并发布为**正式版**（GitHub 上显示为 Latest）。
+CI 在每次 push / PR 上跑 `ubuntu / macos / windows` 三套自检；打 `v*` tag 会触发 Release 工作流，测试通过后构建 macOS 与 Windows 安装包并发布为 **pre-release**，验证通过后再手动标记为正式版。
 
 ## 许可
 
