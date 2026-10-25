@@ -1233,7 +1233,7 @@ def test_secure_store() -> None:
         if not loaded:
             # Some sandboxes (CI runners) have no usable keychain.  Report the
             # reason and skip instead of failing the whole self-test.
-            print(f"[SKIP] credential store  -> 钥匙串不可用: {store.last_error}")
+            print(f"[SKIP] credential store  -> {store.last_error!r}")
             return
         check("credentials round trip", loaded.get("password") == "s3cret", str(loaded))
         check("account round trip", loaded.get("phone") == "13800000000")

@@ -86,7 +86,7 @@ class _MacKeychain:
                 "/System/Library/Frameworks/Security.framework/Security"
             )
         except OSError as exc:  # pragma: no cover - macOS only
-            raise CredentialError(f"无法加载 Security.framework: {exc}") from exc
+            raise CredentialError(f"cannot load Security.framework: {exc}") from exc
 
         core.CFStringCreateWithCString.argtypes = [c_void_p, c_char_p, c_uint32]
         core.CFStringCreateWithCString.restype = c_void_p
@@ -193,7 +193,7 @@ class _MacKeychain:
         )
         if result.returncode != 0 or not self.path.exists():
             detail = result.stderr.decode("utf-8", "replace").strip()
-            raise CredentialError(f"创建钥匙串失败: {detail or result.returncode}")
+            raise CredentialError(f"create keychain failed: {detail or result.returncode}")
 
     def _open(self):
         lib = self._load()
@@ -202,13 +202,13 @@ class _MacKeychain:
         keychain = c_void_p()
         status = lib["sec"].SecKeychainOpen(str(self.path).encode(), ctypes.byref(keychain))
         if status != 0:
-            raise CredentialError(f"打开钥匙串失败 (OSStatus {status})")
+            raise CredentialError(f"keychain open failed (OSStatus {status})")
         password = self._keychain_password()
         unlock = lib["sec"].SecKeychainUnlock(
             keychain, len(password), ctypes.cast(password, c_void_p), True
         )
         if unlock != 0:
-            raise CredentialError(f"解锁钥匙串失败 (OSStatus {unlock})")
+            raise CredentialError(f"keychain unlock failed (OSStatus {unlock})")
         return lib, keychain
 
     def _access(self, lib):
@@ -220,10 +220,10 @@ class _MacKeychain:
             self.trusted_executable().encode(), ctypes.byref(trusted)
         )
         if status != 0:
-            raise CredentialError(f"创建受信程序失败 (OSStatus {status})")
+            raise CredentialError(f"trusted app failed (OSStatus {status})")
         array = lib["core"].CFArrayCreate(None, ctypes.byref(trusted), 1, None)
         if not array:
-            raise CredentialError("无法构造钥匙串访问列表")
+            raise CredentialError("cannot build the keychain access list")
         descriptor = lib["core"].CFStringCreateWithCString(
             None, b"FastETS", lib["kCFStringEncodingUTF8"]
         )
@@ -231,7 +231,7 @@ class _MacKeychain:
         status = lib["sec"].SecAccessCreate(descriptor, array, ctypes.byref(access))
         lib["core"].CFRelease(array)
         if status != 0:
-            raise CredentialError(f"创建钥匙串访问控制失败 (OSStatus {status})")
+            raise CredentialError(f"keychain access list failed (OSStatus {status})")
         return access
 
     # -- api -------------------------------------------------------------
@@ -304,7 +304,7 @@ class _MacKeychain:
             ctypes.byref(item),
         )
         if status != 0:
-            raise CredentialError(f"写入钥匙串失败 (OSStatus {status})")
+            raise CredentialError(f"keychain write failed (OSStatus {status})")
 
     def load(self, account: str) -> str:
         lib, keychain = self._open()
@@ -331,9 +331,10 @@ class _MacKeychain:
                 # the program (the binary was replaced).  The caller has to log
                 # in again, which rewrites the item.
                 raise CredentialError(
-                    "钥匙串里的凭据属于另一个版本的 FastETS，请重新登录一次"
+                    "keychain item belongs to another build (OSStatus -25293), "
+                    "please log in again"
                 )
-            raise CredentialError(f"读取钥匙串失败 (OSStatus {status})")
+            raise CredentialError(f"keychain read failed (OSStatus {status})")
         try:
             return ctypes.string_at(data, length.value).decode("utf-8", "replace")
         finally:
@@ -363,8 +364,8 @@ class _WindowsDpapi:
         class DATA_BLOB(ctypes.Structure):
             _fields_ = [("cbData", c_uint32), ("pbData", c_void_p)]
 
-        advapi = ctypes.cdll.LoadLibrary("Advapi32.dll")
         crypt = ctypes.cdll.LoadLibrary("Crypt32.dll")
+        kernel = ctypes.cdll.LoadLibrary("Kernel32.dll")
         source = DATA_BLOB(len(data), ctypes.cast(ctypes.create_string_buffer(data), c_void_p))
         result = DATA_BLOB()
         description = ctypes.create_unicode_buffer("FastETS")
@@ -377,11 +378,11 @@ class _WindowsDpapi:
             0,
             ctypes.byref(result),
         ):
-            raise CredentialError(f"DPAPI 加密失败: {ctypes.get_last_error()}")
+            raise CredentialError(f"DPAPI protect failed: {ctypes.get_last_error()}")
         try:
             return ctypes.string_at(result.pbData, result.cbData)
         finally:
-            advapi.LocalFree(result.pbData)
+            kernel.LocalFree(result.pbData)
 
     def _unprotect(self, data: bytes) -> bytes:
         import ctypes
@@ -390,8 +391,8 @@ class _WindowsDpapi:
         class DATA_BLOB(ctypes.Structure):
             _fields_ = [("cbData", c_uint32), ("pbData", c_void_p)]
 
-        advapi = ctypes.cdll.LoadLibrary("Advapi32.dll")
         crypt = ctypes.cdll.LoadLibrary("Crypt32.dll")
+        kernel = ctypes.cdll.LoadLibrary("Kernel32.dll")
         source = DATA_BLOB(len(data), ctypes.cast(ctypes.create_string_buffer(data), c_void_p))
         result = DATA_BLOB()
         if not crypt.CryptUnprotectData(
@@ -403,11 +404,11 @@ class _WindowsDpapi:
             0,
             ctypes.byref(result),
         ):
-            raise CredentialError(f"DPAPI 解密失败: {ctypes.get_last_error()}")
+            raise CredentialError(f"DPAPI unprotect failed: {ctypes.get_last_error()}")
         try:
             return ctypes.string_at(result.pbData, result.cbData)
         finally:
-            advapi.LocalFree(result.pbData)
+            kernel.LocalFree(result.pbData)
 
     def save(self, account: str, secret: str) -> None:
         payload = json.dumps({"account": account, "secret": secret}).encode("utf-8")
@@ -416,10 +417,10 @@ class _WindowsDpapi:
 
     def load(self, account: str) -> str:
         if not self.path.exists():
-            raise CredentialError("凭据文件不存在")
+            raise CredentialError("credential file missing")
         data = json.loads(self._unprotect(self.path.read_bytes()).decode("utf-8"))
         if str(data.get("account")) != str(account):
-            raise CredentialError("凭据与账号不匹配")
+            raise CredentialError("credential account mismatch")
         return str(data.get("secret") or "")
 
     def delete(self, account: str) -> bool:
@@ -447,10 +448,10 @@ class _PlainFile:
 
     def load(self, account: str) -> str:
         if not self.path.exists():
-            raise CredentialError("凭据文件不存在")
+            raise CredentialError("credential file missing")
         data = json.loads(self.path.read_text(encoding="utf-8"))
         if str(data.get("account")) != str(account):
-            raise CredentialError("凭据与账号不匹配")
+            raise CredentialError("credential account mismatch")
         return str(data.get("secret") or "")
 
     def delete(self, account: str) -> bool:
@@ -500,7 +501,7 @@ class CredentialStore:
 
     def save(self, payload: Dict[str, str]) -> None:
         if not payload:
-            raise CredentialError("凭据为空，无法保存")
+            raise CredentialError("empty credential payload")
         self._backend.save(self.ITEM_ACCOUNT, json.dumps(payload, ensure_ascii=False))
 
     def load(self) -> Dict[str, str]:
@@ -540,7 +541,7 @@ class CredentialStore:
         thread.start()
         thread.join(timeout)
         if thread.is_alive():
-            self.last_error = "读取系统凭据超时，请重新登录一次"
+            self.last_error = "credential read timed out, please log in again"
             return ""
         if "error" in result:
             self.last_error = str(result["error"])
