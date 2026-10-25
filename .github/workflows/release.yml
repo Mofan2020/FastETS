@@ -147,8 +147,12 @@ jobs:
 
   publish:
     name: publish pre-release
-    needs: build
+    needs: [build, build-macos-intel]
+    # Wait for the optional Intel build too, but never let its failure block
+    # the release.
+    if: always() && needs.build.result == 'success'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
