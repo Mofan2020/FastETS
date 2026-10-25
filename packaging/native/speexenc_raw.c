@@ -45,6 +45,11 @@
 #include "speex/speex.h"
 #include "speex/speex_bits.h"
 
+#if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -355,6 +360,15 @@ int main(int argc, char **argv)
     int complexity = 3;
     const char *lengths_file = NULL;
     int i;
+
+#if defined(_WIN32)
+    /* The Windows CRT opens stdin and stdout in text mode: a 0x1A byte would
+       end the input stream and CRLF would be translated, and on the output
+       side every 0x0A byte would be turned into 0x0D 0x0A.  Both would
+       corrupt the PCM and the Speex frames, so switch to binary mode. */
+    _setmode(_fileno(stdin), _O_BINARY);
+    _setmode(_fileno(stdout), _O_BINARY);
+#endif
 
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--rate") && i + 1 < argc) {

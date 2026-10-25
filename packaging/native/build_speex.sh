@@ -135,9 +135,16 @@ CONFIG_TYPES
 CFLAGS="-O2 -fPIC -DFLOATING_POINT -DEXPORT= -DUSE_KISS_FFT"
 PROBE_SRC="$WORK/flag_probe.c"
 printf 'int main(void){return 0;}\n' > "$PROBE_SRC"
-if "$CC" $CFLAGS -fno-vectorize -fno-slp-vectorize -c "$PROBE_SRC" -o "$WORK/flag_probe.o" 2>/dev/null; then
-    CFLAGS="$CFLAGS -fno-vectorize -fno-slp-vectorize"
-fi
+# clang spells the switches -fno-vectorize / -fno-slp-vectorize, gcc uses
+# -fno-tree-vectorize / -fno-tree-slp-vectorize.
+for NO_VEC in "-fno-vectorize -fno-slp-vectorize" "-fno-tree-vectorize -fno-tree-slp-vectorize"; do
+    # shellcheck disable=SC2086
+    if "$CC" $CFLAGS $NO_VEC -c "$PROBE_SRC" -o "$WORK/flag_probe.o" 2>/dev/null; then
+        # shellcheck disable=SC2086
+        CFLAGS="$CFLAGS $NO_VEC"
+        break
+    fi
+done
 OBJECTS=""
 
 for source in "$SRC"/libspeex/*.c; do
