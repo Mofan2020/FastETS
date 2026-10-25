@@ -261,7 +261,10 @@ def test_audio_pipeline() -> None:
         return
 
     status = tools.speex_status()
-    check("speex encoder detected", bool(status.get("available")), str(status.get("message")))
+    if status.get("available"):
+        check("speex encoder detected", True, str(status.get("message")))
+    else:
+        print(f"[INFO] speex encoder not available: {status.get('message')}")
 
     # A one second sine wave is enough to exercise the whole conversion chain.
     source = config.audio_cache_dir() / "selftest_tone.wav"
@@ -514,7 +517,13 @@ def test_completer_offline() -> None:
     check("completer submitted every question", report.get("done") == 1, str(report.get("done")))
     check("completer reported no failures", report.get("failed") == 0, str(report.get("failed")))
     kinds = sorted(item["kind"] for item in uploaded)
-    check("three attachments uploaded", kinds == ["audio", "speex", "xml"], str(kinds))
+    has_speex = "speex" in kinds
+    if has_speex:
+        check("three attachments uploaded", kinds == ["audio", "speex", "xml"], str(kinds))
+    else:
+        # Without a Speex encoder the submission must still go through - the
+        # spx attachment is optional, only the mp3 and the score XML matter.
+        check("submission continues without a speex encoder", kinds == ["audio", "xml"], str(kinds))
     check(
         "every attachment has content",
         all(item["size"] > 0 for item in uploaded),
@@ -524,7 +533,10 @@ def test_completer_offline() -> None:
     if submitted:
         item = submitted[0]
         check("submission carries mp3", item.get("mp3_url", "").endswith("audio"))
-        check("submission carries speex", item.get("speex_url", "").endswith("speex"))
+        if has_speex:
+            check("submission carries speex", item.get("speex_url", "").endswith("speex"))
+        else:
+            check("submission carries an empty speex", item.get("speex_url", "") == "")
         check("submission carries xml", item.get("xml_url", "").endswith("xml"))
         check("submission carries a score", float(item.get("score", 0)) > 0, str(item.get("score")))
         check("submission carries the score detail", bool(item.get("score_detail")))

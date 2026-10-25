@@ -105,6 +105,24 @@ mkdir -p "$OUT_DIR"
 BUILD="$WORK/build"
 mkdir -p "$BUILD"
 
+# libspeex normally generates include/speex/speex_config_types.h with its
+# configure script.  macOS and Windows use their own typedef branches, but
+# every other platform (Linux) needs the generated header, so it is written
+# here instead of running the full autotools setup.
+cat > "$SRC/include/speex/speex_config_types.h" <<'CONFIG_TYPES'
+#ifndef __SPEEX_TYPES_H__
+#define __SPEEX_TYPES_H__
+
+#include <stdint.h>
+
+typedef int16_t spx_int16_t;
+typedef uint16_t spx_uint16_t;
+typedef int32_t spx_int32_t;
+typedef uint32_t spx_uint32_t;
+
+#endif
+CONFIG_TYPES
+
 # The same defines ffmpeg uses when it builds libspeex: floating point
 # arithmetic and the KISS FFT backend.
 CFLAGS="-O2 -fPIC -DFLOATING_POINT -DEXPORT= -DUSE_KISS_FFT"
