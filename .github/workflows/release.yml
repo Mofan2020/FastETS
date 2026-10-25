@@ -219,12 +219,12 @@ jobs:
           ls -la release-assets
           test -n "$(ls -A release-assets)" || { echo "no archives collected"; exit 1; }
 
-      - name: Publish GitHub pre-release
+      - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           name: ${{ github.event.inputs.tag || github.ref_name }}
-          prerelease: true
+          prerelease: false
           draft: false
           fail_on_unmatched_files: true
           files: release-assets/*.zip
