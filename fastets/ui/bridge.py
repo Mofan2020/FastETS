@@ -75,6 +75,24 @@ CHANGYAN_HOOK_JS = r"""
 """
 
 
+def _friendly_credential_note(note: str) -> str:
+    """Turn the technical credential error into something the user can act on.
+
+    The log keeps the ASCII error code (that is what a bug report needs), the
+    interface gets a sentence that says what to do.
+    """
+    text = (note or "").strip()
+    if not text:
+        return ""
+    if "-25293" in text or "another build" in text:
+        return "钥匙串里的密码属于旧版本程序（程序文件被替换过），请重新登录一次以重建。"
+    if "timed out" in text:
+        return "读取钥匙串超时，请重新登录一次。"
+    if "keychain password file missing" in text:
+        return "钥匙串密码文件丢失，请重新登录一次。"
+    return text
+
+
 class FastETSApi:
     """API object exposed to the web view."""
 
@@ -278,10 +296,11 @@ class FastETSApi:
         try:
             store = self.session.credential_store
             stored = bool(store.load().get("password"))
+            note = _friendly_credential_note(store.last_error)
             return self._ok(
                 backend=store.backend_name,
                 stored=stored,
-                note=store.last_error,
+                note=note,
             )
         except Exception as exc:  # noqa: BLE001
             return self._fail(exc)

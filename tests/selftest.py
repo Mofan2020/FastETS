@@ -388,16 +388,13 @@ def test_submit_payload() -> None:
     check("submit works without a spx attachment", captured["params"].get("spx_file_url") == "")
 
 
-def test_completer_offline() -> None:
-    """The whole submission pipeline, without touching the network.
+def _offline_completer():
+    """Build a Completer that runs the production pipeline against fakes.
 
-    A fake voice provider returns a real mp3, the OSS uploader and the API
-    client are replaced by recorders.  Everything in between - audio
-    conversion, the score XML, the attachment upload and the sync payload - is
-    the production code path.
+    Returns ``(completer, submitted, uploaded, restore)`` or ``None`` when no
+    ffmpeg is available.  ``restore()`` puts the real OSS uploader back.
     """
-    from fastets.core import paper as paper_mod
-    from fastets.core.completer import Completer, LoadedPaper
+    from fastets.core.completer import Completer
     from fastets.voice.base import TTSResult
 
     class FakeProvider:
@@ -427,7 +424,7 @@ def test_completer_offline() -> None:
         ffmpeg = tools.ffmpeg
     except Exception as exc:  # noqa: BLE001
         print(f"[SKIP] completer offline  -> 没有可用的 ffmpeg: {exc}")
-        return
+        return None
 
     sample = config.audio_cache_dir() / "selftest_speech.mp3"
     subprocess.run(
@@ -454,7 +451,7 @@ def test_completer_offline() -> None:
     )
     if not sample.exists():
         print("[SKIP] completer offline  -> 无法生成测试音频")
-        return
+        return None
     speech = sample.read_bytes()
 
     def synthesize(self, text, voice_id="", speed=1.0, pitch=0, **kwargs):
@@ -505,6 +502,28 @@ def test_completer_offline() -> None:
 
     original_uploader = completer_mod.oss.OssUploader
     completer_mod.oss.OssUploader = FakeUploader  # type: ignore[assignment]
+
+    def restore() -> None:
+        completer_mod.oss.OssUploader = original_uploader  # type: ignore[assignment]
+
+    return completer, submitted, uploaded, restore
+
+
+def test_completer_offline() -> None:
+    """The whole submission pipeline, without touching the network.
+
+    A fake voice provider returns a real mp3, the OSS uploader and the API
+    client are replaced by recorders.  Everything in between - audio
+    conversion, the score XML, the attachment upload and the sync payload - is
+    the production code path.
+    """
+    from fastets.core import paper as paper_mod
+    from fastets.core.completer import LoadedPaper
+
+    offline = _offline_completer()
+    if offline is None:
+        return
+    completer, submitted, uploaded, restore = offline
     try:
         question = paper_mod.Question(
             question_id="q1",
@@ -523,7 +542,7 @@ def test_completer_offline() -> None:
             {"id": "h1", "name": "测试作业"}, paper=paper, dry_run=False
         )
     finally:
-        completer_mod.oss.OssUploader = original_uploader  # type: ignore[assignment]
+        restore()
 
     check("completer submitted every question", report.get("done") == 1, str(report.get("done")))
     check("completer reported no failures", report.get("failed") == 0, str(report.get("failed")))
@@ -551,6 +570,145 @@ def test_completer_offline() -> None:
         check("submission carries xml", item.get("xml_url", "").endswith("xml"))
         check("submission carries a score", float(item.get("score", 0)) > 0, str(item.get("score")))
         check("submission carries the score detail", bool(item.get("score_detail")))
+
+
+def test_serial_id_per_pack() -> None:
+    """Every recording inside one resource pack needs its own serial id.
+
+    The server keys an answer record by "pack + item number".  When several
+    questions of the same pack reuse one number, they are merged into a
+    single record and the assignment stops at e.g. 75%.
+    """
+    from fastets.core import paper as paper_mod
+    from fastets.core.completer import LoadedPaper
+
+    offline = _offline_completer()
+    if offline is None:
+        return
+    completer, submitted, _uploaded, restore = offline
+
+    def make(order: int, entity: str, group: str) -> paper_mod.Question:
+        return paper_mod.Question(
+            question_id=f"q{entity}-{order}",
+            homework_id="h1",
+            content_url="",
+            order=order,
+            group_name=group,
+            structure_type="collector.dialogue",
+            question_text="Ask something.",
+            answers=["Answer one."],
+            context={"homework_id": "h1", "set_id": "s1", "entity_id": entity},
+            max_score=5.0,
+        )
+
+    # One pack with three questions, then a second pack with one question.
+    first = paper_mod.Section(
+        "交际应答",
+        "collector.dialogue",
+        [make(1, "e1", "交际应答"), make(2, "e1", "交际应答"), make(3, "e1", "交际应答")],
+    )
+    second = paper_mod.Section("朗读句子", "collector.read", [make(4, "e2", "朗读句子")])
+    paper = LoadedPaper({"id": "h1", "name": "测试作业"}, [first, second])
+    try:
+        completer.complete_homework({"id": "h1", "name": "测试作业"}, paper=paper, dry_run=False)
+    finally:
+        restore()
+
+    serials = [
+        str((item.get("context") or {}).get("serial_id"))
+        for item in submitted
+        if "context" in item
+    ]
+    check("one submission per question", len(serials) == 4, str(serials))
+    check(
+        "serial ids restart per pack and stay unique inside it",
+        serials == ["0", "1", "2", "0"],
+        str(serials),
+    )
+
+
+def test_response_candidates() -> None:
+    """交际应答: the alternatives are answers, the prompt is not read."""
+    from fastets.core import paper as paper_mod
+
+    payload = {
+        "structure_type": "collector.dialogue",
+        "info": {
+            "question": [
+                {
+                    "xh": 1,
+                    "ask": "<p>What do you do after school?</p>",
+                    "std": [
+                        {"value": "I play football."},
+                        {"value": "I read books."},
+                        {"value": "I help my mum."},
+                    ],
+                },
+                {
+                    "xh": 2,
+                    "ask": "<p>Where are you from?</p>",
+                    "std": [{"value": "I am from Shanghai."}],
+                },
+            ]
+        },
+    }
+    section = paper_mod.parse_content_json(payload, "hw", "/d.zip", "交际应答")
+    check("response question count", len(section.questions) == 2, str(len(section.questions)))
+    first = section.questions[0]
+    check("response is flagged", first.is_response, first.group_name)
+    check(
+        "alternatives become candidates",
+        list(first.answer_candidates) == ["I play football.", "I read books.", "I help my mum."],
+        str(first.answer_candidates),
+    )
+    check(
+        "the prompt is not read",
+        first.read_text == "I play football.",
+        first.read_text,
+    )
+    check("one recording per answer", len(first.speech_segments()) == 1, str(first.speech_segments()))
+    check(
+        "the single alternative is still the answer",
+        section.questions[1].read_text == "I am from Shanghai.",
+        section.questions[1].read_text,
+    )
+
+    # A plain role play question keeps its old behaviour.
+    role = paper_mod.parse_content_json(
+        {
+            "structure_type": "collector.role",
+            "info": {
+                "question": [
+                    {"ask": "<p>Hello there.</p>", "std": [{"value": "Hi!"}]},
+                ]
+            },
+        },
+        "hw",
+        "/e.zip",
+        "角色扮演",
+    )
+    check("role play is not a response", not role.questions[0].is_response)
+    check("role play has no candidates", not role.questions[0].answer_candidates)
+
+
+def test_log_redaction() -> None:
+    """The log file must never contain the login password."""
+    from fastets.core.ets_api import redact_params
+
+    redacted = redact_params(
+        {
+            "phone": "13800000000",
+            "password": "secret-password",
+            "token": "abcdefghijklmnop",
+            "code": "123456",
+            "homework_id": "h1",
+        }
+    )
+    check("password masked", redacted.get("password") == "***", str(redacted.get("password")))
+    check("token masked", "abcdefghijklmnop" not in str(redacted.get("token")), str(redacted.get("token")))
+    check("code masked", redacted.get("code") == "***", str(redacted.get("code")))
+    check("phone kept for debugging", redacted.get("phone") == "13800000000")
+    check("other params kept", redacted.get("homework_id") == "h1")
 
 
 def test_speex_frames() -> None:
@@ -1378,6 +1536,9 @@ def main() -> int:
         test_credential_migration,
         test_stop_cancels_the_run,
         test_completer_offline,
+        test_serial_id_per_pack,
+        test_response_candidates,
+        test_log_redaction,
         test_config,
         test_live_api,
     ):

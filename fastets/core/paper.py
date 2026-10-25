@@ -161,8 +161,8 @@ class Question:
         self.original_text = original_text
         self.max_score = max_score
         self.read_text = read_text
-        # 复述 / 表达这类题型在资源包里带多份「示例答案」，朗读时需要从
-        # 里面挑一份（第一个 / 随机 / 手动选择）。
+        # 复述 / 表达 / 交际应答这类题型在资源包里带多份「示例答案」，朗读时
+        # 需要从里面挑一份（第一个 / 随机 / 手动选择）。
         self.answer_candidates = [c for c in (answer_candidates or []) if c]
 
     # -- classification -----------------------------------------------------
@@ -170,6 +170,15 @@ class Question:
     @property
     def is_choice(self) -> bool:
         return self.structure_type == "collector.choose"
+
+    @property
+    def is_response(self) -> bool:
+        """交际应答 / 快速应答: one answer out of many, one recording."""
+        return (
+            self.structure_type == "collector.dialogue"
+            or "交际应答" in self.group_name
+            or "快速应答" in self.group_name
+        )
 
     @property
     def needs_audio(self) -> bool:
@@ -215,8 +224,8 @@ class Question:
         if not text:
             return []
         kind = self.kind
-        if kind in ("短文朗读", "模仿朗读", "信息转述"):
-            # One recording for the whole passage.
+        if kind in ("短文朗读", "模仿朗读", "信息转述") or self.is_response:
+            # One recording for the whole passage / the whole answer.
             return [text]
         sentences = split_sentences(text)
         if kind in ("逐句跟读", "朗读"):
@@ -373,6 +382,13 @@ def parse_content_json(
 
     if structure_type in ("collector.role", "collector.3q5a", "collector.dialogue"):
         entries = info.get("question") or []
+        # 交际应答 / 快速应答: the "std" entries are alternative answers to the
+        # situation, so only one of them is spoken - never all of them.
+        is_response = (
+            structure_type == "collector.dialogue"
+            or "交际应答" in group_name
+            or "快速应答" in group_name
+        )
         for index, raw in enumerate(entries):
             entry = raw if isinstance(raw, dict) else {}
             order = local_order(index, entry)
@@ -385,7 +401,10 @@ def parse_content_json(
                 entry.get("ask") or entry.get("question") or entry.get("topic")
             )
             original = clean_text(entry.get("value"))
-            read_text = question_text or (answers[0] if answers else "") or original
+            if is_response and answers:
+                read_text = answers[0]
+            else:
+                read_text = question_text or (answers[0] if answers else "") or original
             questions.append(
                 Question(
                     question_id=_question_id(homework_id, content_url, order),
@@ -400,6 +419,7 @@ def parse_content_json(
                     original_text=original,
                     max_score=max_score,
                     read_text=read_text,
+                    answer_candidates=list(answers) if is_response else None,
                 )
             )
         return Section(group_name, structure_type, questions)

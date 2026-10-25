@@ -296,17 +296,36 @@ function renderPapers() {
         const row = document.createElement('div');
         row.className = 'paper-q';
         const candidates = q.answer_candidates || [];
-        let segments;
+        row.innerHTML = `<div class="paper-q-text">第 ${q.order} 题 · ${escapeHtml(q.kind || '')} · 满分 ${q.max_score}</div>`;
         if (candidates.length > 1) {
-          // 复述 / 表达：多份示例答案，朗读时只会挑其中一份。
-          segments = `共 ${candidates.length} 份示例答案，朗读时按设置挑选（${escapeHtml(pickModeLabel())}）`;
-        } else if (candidates.length === 1) {
-          segments = candidates[0];
+          // 交际应答 / 复述 / 表达：多份备选答案，朗读时只读其中一份。
+          const note = document.createElement('div');
+          note.className = 'paper-q-body';
+          note.textContent = `共 ${candidates.length} 份备选答案，朗读时按设置挑选（${pickModeLabel()}）：`;
+          row.appendChild(note);
+          const list = document.createElement('ol');
+          list.className = 'answer-list preview-list';
+          candidates.forEach((text) => {
+            const item = document.createElement('li');
+            item.className = 'answer-item';
+            const body = document.createElement('div');
+            body.className = 'answer-body';
+            const para = document.createElement('p');
+            para.className = 'answer-text';
+            para.textContent = text;
+            body.appendChild(para);
+            item.appendChild(body);
+            list.appendChild(item);
+          });
+          row.appendChild(list);
         } else {
-          segments = (q.answers && q.answers.length) ? q.answers.join(' / ') : (q.read_text || '');
+          const body = document.createElement('div');
+          body.className = 'paper-q-body';
+          body.textContent = candidates.length === 1
+            ? candidates[0]
+            : ((q.answers && q.answers.length) ? q.answers.join(' / ') : (q.read_text || ''));
+          row.appendChild(body);
         }
-        row.innerHTML = `<div class="paper-q-text">第 ${q.order} 题 · ${escapeHtml(q.kind || '')} · 满分 ${q.max_score}</div>
-                         <div class="paper-q-body">${escapeHtml(segments)}</div>`;
         wrap.appendChild(row);
       });
     });

@@ -47,6 +47,28 @@ class EtsApiError(RuntimeError):
         self.route = route
 
 
+# Secrets that must never reach the log file ---------------------------------
+_SECRET_PARAMS = ("password", "token", "code", "suc_user_token", "login")
+
+
+def redact_params(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Copy the request parameters with every secret masked.
+
+    The debug log used to write the plain login password into
+    ``fastets.log``, which is a real leak: the log is a plain text file in the
+    user's data directory.
+    """
+    redacted: Dict[str, Any] = {}
+    for key, value in (params or {}).items():
+        if key not in _SECRET_PARAMS:
+            redacted[key] = value
+        elif key == "token" and value:
+            redacted[key] = f"{str(value)[:6]}***"
+        else:
+            redacted[key] = "***"
+    return redacted
+
+
 class DeviceBindRequired(EtsApiError):
     """The server wants this device to be (re)bound before it issues a token."""
 
@@ -138,7 +160,7 @@ class EtsApiClient:
             url = f"{url}?{urlencode(query)}"
 
         self._log_info("ETS POST /%s", route)
-        self._log_debug("ETS params /%s: %s", route, params)
+        self._log_debug("ETS params /%s: %s", route, redact_params(params))
         try:
             response = self.session.post(
                 url,

@@ -580,6 +580,13 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
   white-space: pre-wrap; word-break: break-word;
 }
 
+/* 预览里的备选答案：逐条列出，不是可点击的选择框 */
+.paper-q .preview-list { margin: 8px 0 0; padding-left: 0; list-style: none; }
+.paper-q .preview-list .answer-item { cursor: default; }
+.paper-q .preview-list .answer-item:hover {
+  border-color: var(--stroke-soft); background: rgba(var(--glass) / 0.32);
+}
+
 .badge {
   font-size: 11.5px; padding: 3px 10px; border-radius: 999px;
   background: var(--accent-soft); color: var(--accent); font-weight: 620;
