@@ -13,6 +13,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+# Windows consoles default to cp1252 and cannot encode Chinese output.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+
 from fastets import config  # noqa: E402
 from fastets.core import crypto, paper as paper_mod, score as score_mod, zipcrypto  # noqa: E402
 from fastets.core.ets_api import EtsApiClient  # noqa: E402

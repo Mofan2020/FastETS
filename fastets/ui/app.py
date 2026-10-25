@@ -25,9 +25,14 @@ def setup_logging() -> logging.Logger:
     logger.setLevel(logging.DEBUG)
     logger.handlers.clear()
 
+    # Windows consoles use cp1252; never let a Chinese log line kill the app.
     stream = logging.StreamHandler(sys.stderr)
     stream.setLevel(logging.INFO)
     stream.setFormatter(logging.Formatter(LOG_FORMAT))
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError, ValueError):
+        pass
     logger.addHandler(stream)
 
     try:

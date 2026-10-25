@@ -404,9 +404,16 @@ class FastETSApi:
         content = text or "Hello, this is a test of the FastETS speech engine."
         try:
             provider = build_provider(settings, logger=self._log)
+            voice_id = (
+                str(settings.get("openai_voice") or "")
+                if provider.name == "openai_compat"
+                else str(settings.get("edge_voice") or "")
+                if provider.name == "edge"
+                else str(settings.get("minimax_voice_id") or "")
+            )
             result = provider.synthesize(
                 content,
-                voice_id=str(settings.get("minimax_voice_id") or ""),
+                voice_id=voice_id,
                 speed=float(settings.get("tts_speed", 1.0) or 1.0),
                 pitch=int(settings.get("tts_pitch", 0) or 0),
             )

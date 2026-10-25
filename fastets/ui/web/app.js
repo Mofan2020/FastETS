@@ -504,7 +504,12 @@ function fillSettings(settings) {
   if (region === 'custom') $('#set-minimax-base').value = state.settings.minimax_base_url || '';
   syncProviderBoxes();
   $('#side-mode').textContent = state.settings.dry_run ? '演练' : '真实提交';
-  $('#side-voice').textContent = state.settings.minimax_voice_id ? '已克隆' : '未克隆';
+  const voiceId = state.settings.tts_provider === 'openai_compat'
+    ? state.settings.openai_voice
+    : state.settings.tts_provider === 'edge'
+      ? state.settings.edge_voice
+      : state.settings.minimax_voice_id;
+  $('#side-voice').textContent = voiceId ? '已克隆' : '未克隆';
 }
 
 function collectSettings() {

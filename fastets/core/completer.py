@@ -314,6 +314,14 @@ class Completer:
 
     # -- scoring -------------------------------------------------------------
 
+    def _voice_for(self, provider: VoiceProvider) -> str:
+        """The voice identifier that belongs to the active provider."""
+        if provider.name == "openai_compat":
+            return str(self.settings.get("openai_voice") or "")
+        if provider.name == "edge":
+            return str(self.settings.get("edge_voice") or "")
+        return str(self.settings.get("minimax_voice_id") or "")
+
     def _score_for(
         self, question: paper_mod.Question, segment_max: float, text: str, duration_ms: int
     ) -> float:
@@ -475,7 +483,7 @@ class Completer:
         self._emit("tts", f"合成语音：{label}", group=question.group_name)
         result = self.provider.synthesize(
             text,
-            voice_id=str(self.settings.get("minimax_voice_id") or ""),
+            voice_id=self._voice_for(self.provider),
             speed=float(self.settings.get("tts_speed", 1.0) or 1.0),
             pitch=int(self.settings.get("tts_pitch", 0) or 0),
         )
@@ -626,7 +634,13 @@ class Completer:
             prompt_path=Path(en_sample) if en_sample else None,
             prompt_text=en_text,
         )
-        self.settings["minimax_voice_id"] = result.voice_id
+        # Store the cloned voice under the setting the active provider reads.
+        if provider.name == "openai_compat":
+            self.settings["openai_voice"] = result.voice_id
+        elif provider.name == "edge":
+            self.settings["edge_voice"] = result.voice_id
+        else:
+            self.settings["minimax_voice_id"] = result.voice_id
         config.save_settings(self.settings)
         self._emit("clone", f"声音克隆完成：{result.voice_id}", percent=100)
         return {"voice_id": result.voice_id, "provider": result.provider}
