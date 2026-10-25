@@ -144,13 +144,29 @@ function afterLogin(result) {
   $('#side-account').textContent = `${result.grade || ''}${result.account || ''}`.trim() || '已登录';
   $('#login-password').value = '';
   log(`登录成功：${result.grade || ''} ${result.account || ''}`);
+  showCredentialHint();
   showTab('homework');
 }
+
+async function showCredentialHint() {
+  const hint = $('#credential-hint');
+  if (!hint) return;
+  const result = await api('credential_status');
+  if (!result.ok) { hint.textContent = '账号与密码不会写进普通配置文件。'; return; }
+  hint.textContent = result.stored
+    ? `账号与密码保存在${result.backend}，只有 FastETS 自己能读取。`
+    : (result.note
+      ? `账号与密码保存在${result.backend}，但需要重新登录一次：${result.note}`
+      : `账号与密码保存在${result.backend}（尚未保存密码）。`);
+}
+
+showCredentialHint();
 
 $('#btn-logout').addEventListener('click', async () => {
   await api('logout');
   setStatus('未登录');
   $('#side-account').textContent = '—';
+  showCredentialHint();
   log('已退出登录');
 });
 

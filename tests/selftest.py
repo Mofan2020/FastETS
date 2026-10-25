@@ -11,6 +11,7 @@ import json
 import platform
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import List
 
@@ -301,6 +302,15 @@ def test_audio_pipeline() -> None:
         "mp3 duration about one second",
         800 <= info.get("duration_ms", 0) <= 1400,
         str(info.get("duration_ms")),
+    )
+    # duration_ms() used to shell out to ffprobe, which is not shipped with
+    # the bundled ffmpeg - it always returned 0 and every submission went out
+    # with use_time=0.
+    measured = tools.duration_ms(mp3)
+    check(
+        "duration probe returns the real length",
+        800 <= measured <= 1400,
+        str(measured),
     )
 
     try:
@@ -653,7 +663,9 @@ def _split_frames(payload: bytes, helper: str, ffmpeg: str, source: Path) -> Lis
 def test_config() -> None:
     check("data dir", config.data_dir().exists(), str(config.data_dir()))
     settings = config.load_settings()
-    check("default provider", settings.get("tts_provider") == "minimax")
+    # The defaults must not depend on what the user has configured locally.
+    check("default provider", config.DEFAULT_SETTINGS.get("tts_provider") == "minimax")
+    check("configured provider loaded", bool(settings.get("tts_provider")))
     check("pacing defaults", settings.get("pace_enabled") is True)
     # The defaults must not depend on what the user has configured locally.
     check("dry run default", config.DEFAULT_SETTINGS.get("dry_run") is True)
@@ -1086,6 +1098,254 @@ def test_mark_retry() -> None:
     )
 
 
+def test_resource_id_flow() -> None:
+    """The resource_id of the assignment has to reach every submission.
+
+    The server looks the marking service up by resource_id.  A wrong id (the
+    generic default) makes every single question fail with
+    "远程获取ets服务失败", so the id from the homework list must win.
+    """
+    from fastets.core import paper as paper_mod
+
+    payload = {"info": {"stid": 665159, "value": "hello"}}
+    section = paper_mod.parse_content_json(
+        payload,
+        homework_id="110058131",
+        content_url="x.zip",
+        group_name="朗读词组",
+        context_base={"set_id": "614336", "resource_id": "240"},
+    )
+    question = section.questions[0]
+    check(
+        "resource_id reaches the question context",
+        question.context.get("resource_id") == "240",
+        str(question.context.get("resource_id")),
+    )
+    check(
+        "set_id reaches the question context",
+        question.context.get("set_id") == "614336",
+        str(question.context.get("set_id")),
+    )
+    check(
+        "entity_id comes from stid",
+        question.context.get("entity_id") == "665159",
+        str(question.context.get("entity_id")),
+    )
+
+    # Without the assignment id the generic default is used.
+    fallback = paper_mod.parse_content_json(
+        payload,
+        homework_id="110058131",
+        content_url="x.zip",
+        group_name="朗读词组",
+        context_base={"set_id": "614336"},
+    ).questions[0]
+    check(
+        "resource_id falls back to the default",
+        fallback.context.get("resource_id") == config.ETS_EVALUATE_RESOURCE_ID,
+        str(fallback.context.get("resource_id")),
+    )
+
+
+def test_cancel_stops_the_run() -> None:
+    """Pressing "stop" has to interrupt the run, not just relabel it."""
+    import threading
+
+    from fastets.core import paper as paper_mod
+    from fastets.core.completer import CancelledError, Completer
+
+    cancel = threading.Event()
+    completer = Completer(
+        session=None,  # type: ignore[arg-type]
+        settings={"pace_enabled": True, "reading_wpm": 150},
+        cancel_event=cancel,
+    )
+    check("pacer shares the cancel flag", completer.pacer.stopped is False)
+    cancel.set()
+    check("pacer sees the cancel flag", completer.pacer.stopped is True)
+
+    raised = False
+    try:
+        completer._check_cancel()
+    except CancelledError:
+        raised = True
+    check("cancel raises CancelledError", raised)
+
+    # The waiting helper must return as soon as the flag is set.
+    completer2 = Completer(
+        session=None,  # type: ignore[arg-type]
+        settings={},
+        cancel_event=threading.Event(),
+    )
+    completer2._cancel_event.set()
+    started = time.monotonic()
+    raised2 = False
+    try:
+        completer2._wait(5.0)
+    except CancelledError:
+        raised2 = True
+    elapsed = time.monotonic() - started
+    check("cancel interrupts a wait", raised2 and elapsed < 1.0, f"{elapsed:.2f}s")
+
+
+def test_token_refresh() -> None:
+    """An expired token must be renewed automatically, not fail the run."""
+    from fastets.core.ets_api import EtsApiClient
+
+    calls: list = []
+
+    class FakeClient(EtsApiClient):
+        def _raw_request(self, route, params, query=None):
+            calls.append((route, dict(params)))
+            if len(calls) == 1:
+                return {"code": 20004, "msg": "ets的token过期"}
+            return {"code": 0, "body": {"ok": True}}
+
+    client = FakeClient(token_refresher=lambda: "fresh-token")
+    payload = client.request("g/homework/list", {"token": "old-token", "sn": "test"})
+    check("expired token is refreshed", len(calls) == 2, str(len(calls)))
+    check("the retry uses the new token", calls[-1][1].get("token") == "fresh-token")
+    check("the request succeeds after the refresh", payload.get("code") == 0)
+
+    # Without a refresher the original error has to surface.
+    plain = FakeClient()
+    calls.clear()
+    try:
+        plain.request("g/homework/list", {"token": "old-token", "sn": "test"})
+        failed = False
+    except Exception as exc:  # noqa: BLE001
+        failed = "token过期" in str(exc)
+    check("without a refresher the error surfaces", failed)
+
+
+def test_secure_store() -> None:
+    """The account and password must live in the system credential store."""
+    import shutil
+    import tempfile
+
+    from fastets.core.secure_store import CredentialStore
+
+    with tempfile.TemporaryDirectory() as folder:
+        store = CredentialStore(Path(folder))
+        check("credential store backend", bool(store.backend_name), store.backend_name)
+        store.save({"phone": "13800000000", "password": "s3cret"})
+        loaded = store.load()
+        check("credentials round trip", loaded.get("password") == "s3cret", str(loaded))
+        check("account round trip", loaded.get("phone") == "13800000000")
+        if platform.system() == "Darwin":
+            # The plain files must not contain the secret.
+            on_disk = "\n".join(
+                p.read_text(encoding="utf-8", errors="ignore")
+                for p in Path(folder).rglob("*")
+                if p.is_file() and p.suffix in (".json", ".txt", "")
+            )
+            check("no plaintext secret on disk", "s3cret" not in on_disk)
+            # The keychain must be readable only by this program.
+            keychain = Path(folder) / "fastets.keychain-db"
+            check("macOS keychain created", keychain.exists() and keychain.stat().st_size > 0)
+            store.delete()
+            check("credentials deleted", store.load() == {})
+
+            # A stale item (written by another build with a different access
+            # list) must not shadow the new one.
+            from fastets.core import secure_store
+
+            original = secure_store._MacKeychain.trusted_executable
+            try:
+                secure_store._MacKeychain.trusted_executable = staticmethod(
+                    lambda: "/bin/cat"
+                )
+                store.save({"phone": "13800000000", "password": "stale"})
+                secure_store._MacKeychain.trusted_executable = staticmethod(original)
+                store.save({"phone": "13800000000", "password": "fresh"})
+                check("stale item replaced", store.load().get("password") == "fresh")
+            finally:
+                secure_store._MacKeychain.trusted_executable = staticmethod(original)
+            store.delete()
+
+
+def test_credential_migration() -> None:
+    """A state file with a plaintext password must be migrated and cleaned."""
+    import shutil
+    import tempfile
+
+    from fastets import config as config_mod
+    from fastets.core.session import Session
+
+    with tempfile.TemporaryDirectory() as folder:
+        root = Path(folder)
+        state = root / "state.json"
+        state.write_text(
+            json.dumps(
+                {
+                    "session": {
+                        "device_code": "706472F380C82685|141811DB40EFD640",
+                        "phone": "13800000000",
+                        "password": "legacy-secret",
+                        "token": "abc",
+                    }
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        original = config_mod.data_dir
+        config_mod.data_dir = lambda: root  # type: ignore[assignment]
+        try:
+            session = Session()
+            check("phone migrated", session.phone == "13800000000", session.phone)
+            check("password migrated", session.password == "legacy-secret")
+            raw = state.read_text(encoding="utf-8")
+            check("plaintext removed from the state file", "legacy-secret" not in raw)
+            check("phone removed from the state file", "13800000000" not in raw)
+            check("token still in the state file", "abc" in raw)
+        finally:
+            config_mod.data_dir = original  # type: ignore[assignment]
+
+
+def test_stop_cancels_the_run() -> None:
+    """Pressing "stop" must end the job instead of just relabelling it."""
+    import threading
+    import time as time_module
+
+    from fastets.core.pacing import Pacer
+    from fastets.jobs.runner import JobRunner
+
+    runner = JobRunner()
+    started = threading.Event()
+    finished = threading.Event()
+
+    def work() -> str:
+        # The bridge wires the runner's cancel flag into the pacer.
+        pacer = Pacer(
+            reading_wpm=150,
+            max_reading_delay_ms=9000,
+            stop_event=runner.cancel_event,
+        )
+        pacer.reset()
+        started.set()
+        # The pacer waits on the runner's cancel flag, so the stop button
+        # wakes it up right away.
+        for _ in range(50):
+            pacer.reading("this is a fairly long sentence to read aloud")
+            if pacer.stopped:
+                break
+        finished.set()
+        return "stopped" if pacer.stopped else "ran to the end"
+
+    job = runner.start("complete", "test", work)
+    check("job started", started.wait(timeout=5))
+    time_module.sleep(0.2)
+    stopped = runner.stop()
+    check("stop reported", stopped)
+    check("job finished quickly", finished.wait(timeout=5))
+    deadline = time_module.time() + 5
+    while time_module.time() < deadline and job.status not in ("cancelled", "succeeded", "failed"):
+        time_module.sleep(0.05)
+    check("job status is cancelled", job.status == "cancelled", job.status)
+    check("job message", job.message == "已取消", job.message)
+
+
 def main() -> int:
     for fn in (
         test_envelope,
@@ -1106,6 +1366,12 @@ def main() -> int:
         test_mark_error_handling,
         test_mark_retry,
         test_macos_voice,
+        test_resource_id_flow,
+        test_cancel_stops_the_run,
+        test_token_refresh,
+        test_secure_store,
+        test_credential_migration,
+        test_stop_cancels_the_run,
         test_completer_offline,
         test_config,
         test_live_api,

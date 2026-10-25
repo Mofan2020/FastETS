@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import threading
 from typing import Any, Callable, Dict, List, Optional
 
 from .. import config
 from . import crypto
+from .secure_store import CredentialStore
 from .ets_api import (
     DeviceBindRequired,
     EtsApiClient,
@@ -27,6 +29,14 @@ class Session:
         self._store = config.JsonStore(config.state_path(), {})
         self._data: Dict[str, Any] = self._store.read().get(STATE_KEY) or {}
         self._client: Optional[EtsApiClient] = None
+        self._credentials_store: Optional[CredentialStore] = None
+        self._credential_cache: Optional[Dict[str, str]] = None
+        # Move a legacy plaintext password into the credential store right
+        # away, so the plain copy never survives a restart.
+        try:
+            self._credentials()
+        except Exception:  # noqa: BLE001 - never block the start-up
+            pass
 
     # -- persistence --------------------------------------------------------
 
@@ -62,11 +72,63 @@ class Session:
 
     @property
     def phone(self) -> str:
-        return str(self._read("phone", "") or "")
+        return str(self._credentials().get("phone", "") or "")
 
     @property
     def password(self) -> str:
-        return str(self._read("password", "") or "")
+        return str(self._credentials().get("password", "") or "")
+
+    # -- credential store ----------------------------------------------------
+
+    @property
+    def credential_store(self) -> CredentialStore:
+        """The system credential store that holds phone and password."""
+        with self._lock:
+            if self._credentials_store is None:
+                self._credentials_store = CredentialStore(config.data_dir())
+            return self._credentials_store
+
+    def _credentials(self) -> Dict[str, str]:
+        """The phone and password, read from the system credential store.
+
+        Older versions kept both in the plain state file.  On the first read
+        they are moved into the credential store and removed from the file.
+        """
+        with self._lock:
+            if self._credential_cache is not None:
+                return self._credential_cache
+            store = self.credential_store
+            data = store.load()
+            if not data:
+                legacy_phone = str(self._data.get("phone") or "")
+                legacy_password = str(self._data.get("password") or "")
+                if legacy_phone or legacy_password:
+                    data = {"phone": legacy_phone, "password": legacy_password}
+                    try:
+                        store.save(data)
+                        if self._log:
+                            self._log.info("凭据已迁移到 %s", store.backend_name)
+                    except Exception as exc:  # noqa: BLE001 - keep working
+                        if self._log:
+                            self._log.error("迁移凭据到 %s 失败: %s", store.backend_name, exc)
+                    # The plain copy never stays behind.
+                    self._data.pop("phone", None)
+                    self._data.pop("password", None)
+                    self._save()
+            self._credential_cache = data
+            return self._credential_cache
+
+    def _store_credentials(self, phone: str, password: str) -> None:
+        """Persist phone and password in the system credential store."""
+        payload = {"phone": str(phone or ""), "password": str(password or "")}
+        try:
+            self.credential_store.save(payload)
+        except Exception as exc:  # noqa: BLE001 - the login must not break
+            if self._log:
+                self._log.error("保存凭据到 %s 失败: %s", self.credential_store.backend_name, exc)
+            raise
+        with self._lock:
+            self._credential_cache = payload
 
     @property
     def parent_account_id(self) -> str:
@@ -85,15 +147,38 @@ class Session:
         return bool(self.token)
 
     def remember(self, **fields: Any) -> None:
+        # Phone and password never go into the plain state file.
+        phone = fields.pop("phone", None)
+        password = fields.pop("password", None)
+        if phone is not None or password is not None:
+            current = self._credentials()
+            if password == "":
+                # The user does not want the password remembered.
+                self._store_credentials(
+                    phone if phone is not None else current.get("phone", ""), ""
+                )
+            else:
+                self._store_credentials(
+                    phone if phone is not None else current.get("phone", ""),
+                    password if password is not None else current.get("password", ""),
+                )
         with self._lock:
             self._data.update({k: v for k, v in fields.items() if v is not None})
+            self._data.pop("phone", None)
+            self._data.pop("password", None)
             self._save()
 
     def clear(self) -> None:
         with self._lock:
             keep = {"device_code": self._data.get("device_code")}
             self._data = keep
+            self._credential_cache = None
             self._save()
+        try:
+            self.credential_store.delete()
+        except Exception as exc:  # noqa: BLE001 - best effort
+            if self._log:
+                self._log.error("删除凭据失败: %s", exc)
 
     # -- client --------------------------------------------------------------
 
@@ -106,8 +191,29 @@ class Session:
                     protocol=self.protocol,
                     verify_ssl=not settings.get("skip_ssl_verify", False),
                     logger=self._log,
+                    token_refresher=self._refresh_expired_token,
                 )
             return self._client
+
+    def _refresh_expired_token(self) -> str:
+        """Log in again after the server reported an expired token.
+
+        ETS tokens only live for a while; a long session would otherwise stop
+        working with "ets的token过期" until the user logs in by hand.
+        """
+        phone = self.phone
+        password = self.password
+        if not phone or not password:
+            return ""
+        if self._log:
+            self._log.info("登录状态已过期，正在自动重新登录")
+        try:
+            self.login_with_password(phone, password, remember_password=True)
+        except Exception as exc:  # noqa: BLE001 - the caller retries and fails
+            if self._log:
+                self._log.error("自动重新登录失败: %s", exc)
+            return ""
+        return self.token
 
     def set_protocol(self, protocol: str) -> None:
         with self._lock:
@@ -160,9 +266,14 @@ class Session:
         token = getattr(self, "_pending_token", "") or self.token
         if not token:
             raise EtsApiError("登录状态已丢失，请重新登录")
+        remembered = bool(getattr(self, "_pending_remember", True))
         self.remember(
             phone=getattr(self, "_pending_phone", "") or self.phone,
-            password=getattr(self, "_pending_password", None),
+            password=(
+                getattr(self, "_pending_password", None) or self.password
+                if remembered
+                else ""
+            ),
             token=token,
             parent_account_id=account["parent_id"],
             selected_ecard_id=account["id"],

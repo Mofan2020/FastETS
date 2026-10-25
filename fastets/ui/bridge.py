@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 
 from .. import config
 from ..core import completer as completer_mod
+from ..core.completer import CancelledError
 from ..core.ets_api import EtsApiError
 from ..core.session import Session
 from ..jobs.runner import JobRunner
@@ -101,6 +102,7 @@ class FastETSApi:
             logger=self._log,
             progress=progress,
             chooser=self._ask_user_choice,
+            cancel_event=self.runner.cancel_event,
         )
 
     def _set_window(self, window) -> None:
@@ -144,6 +146,9 @@ class FastETSApi:
             self._choose_event = None
             self._choose_request = None
             self._choose_choice = None
+        if self.runner.cancel_event.is_set():
+            # The run was stopped while we were waiting for the user.
+            raise CancelledError("任务已被用户取消")
         if not answered or choice is None:
             if self._log:
                 self._log.info("选择答案超时，改用第一个示例答案: %s", label)
@@ -268,6 +273,19 @@ class FastETSApi:
         self.session.clear()
         return self._ok()
 
+    def credential_status(self) -> Dict[str, Any]:
+        """Where the account and the password are kept."""
+        try:
+            store = self.session.credential_store
+            stored = bool(store.load().get("password"))
+            return self._ok(
+                backend=store.backend_name,
+                stored=stored,
+                note=store.last_error,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return self._fail(exc)
+
     def import_token(self, token: str) -> Dict[str, Any]:
         try:
             result = self.session.import_token(token.strip())
@@ -384,9 +402,11 @@ class FastETSApi:
         settings = config.load_settings()
         if dry_run is None:
             dry_run = bool(settings.get("dry_run", True))
-        completer = self._completer(progress=self.runner.progress)
 
         def run() -> Dict[str, Any]:
+            # The completer is created inside the worker so it gets the cancel
+            # flag of *this* job - the runner replaces the flag on every start.
+            completer = self._completer(progress=self.runner.progress)
             reports: List[Dict[str, Any]] = []
             for homework in homeworks:
                 self.runner.log(

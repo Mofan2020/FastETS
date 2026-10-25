@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import random
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -92,13 +93,15 @@ class Completer:
         logger=None,
         progress: Optional[ProgressCallback] = None,
         chooser: Optional[AnswerChooser] = None,
+        cancel_event: Optional[threading.Event] = None,
     ) -> None:
         self.session = session
         self.settings = settings if settings is not None else config.load_settings()
         self._log = logger
         self._progress_cb = progress
         self._chooser = chooser
-        self.pacer: Pacer = pacer_from_settings(self.settings)
+        self._cancel_event = cancel_event
+        self.pacer: Pacer = pacer_from_settings(self.settings, stop_event=cancel_event)
         self._provider: Optional[VoiceProvider] = None
         self._audio = audio_mod.AudioTools(
             ffmpeg_path=str(self.settings.get("ffmpeg_path") or ""), logger=logger
@@ -149,8 +152,27 @@ class Completer:
         )
 
     def _check_cancel(self) -> None:
-        if self.pacer.stopped:
+        """Raise when the user pressed "stop".
+
+        Both the pacer and the job runner's cancel flag are honoured: the
+        pacer owns the interruptible sleeps, the runner flag catches the
+        moments in between (uploads, synthesis, requests).
+        """
+        if self.pacer.stopped or (
+            self._cancel_event is not None and self._cancel_event.is_set()
+        ):
             raise CancelledError("任务已被用户取消")
+
+    def _wait(self, seconds: float) -> None:
+        """Sleep, but wake up immediately when the run is cancelled."""
+        if seconds <= 0:
+            self._check_cancel()
+            return
+        if self._cancel_event is not None:
+            if self._cancel_event.wait(seconds):
+                self._check_cancel()
+            return
+        time.sleep(seconds)
 
     # -- listing ------------------------------------------------------------
 
@@ -299,6 +321,16 @@ class Completer:
         offsets: Dict[str, int] = {}
         set_id = str(homework.get("set_id") or "")
         homework_id = str(homework.get("id") or "")
+        # The marking service is looked up by resource_id.  It is a property of
+        # the assignment (the homework list carries it), not of the question, so
+        # it has to be handed down to every question of this assignment.
+        resource_id = str(
+            homework.get("resource_id")
+            or (homework.get("raw") or {}).get("resource_id")
+            or ""
+        )
+        if not resource_id:
+            resource_id = self._lookup_resource_id(homework_id, token=None)
 
         for index, content in enumerate(contents):
             self._check_cancel()
@@ -334,13 +366,45 @@ class Completer:
                 homework_id,
                 str(content.get("url") or ""),
                 group_name,
-                context_base={"set_id": set_id},
+                context_base={"set_id": set_id, "resource_id": resource_id},
                 order_offset=offset,
             )
             sections.append(section)
             offsets[group_name] = offset + len(section.questions)
 
         return LoadedPaper(homework, sections)
+
+    def _lookup_resource_id(self, homework_id: str, token=None) -> str:
+        """Find the ``resource_id`` of an assignment in the homework list.
+
+        The id is what the server uses to look up the marking service, so a
+        missing one has to be recovered instead of falling back to the generic
+        default - otherwise every submission fails.
+        """
+        if not homework_id:
+            return ""
+        try:
+            api_token = token or self.session.token or self.session.ensure_fresh_token()
+        except EtsApiError:
+            return ""
+        for status in ("1", "2", "3"):
+            try:
+                result = self.client.homework_list(
+                    api_token, self.session.parent_account_id, status=status
+                )
+            except EtsApiError:
+                continue
+            for item in result.get("homeworks") or []:
+                if str(item.get("id")) == str(homework_id):
+                    found = str(
+                        item.get("resource_id")
+                        or (item.get("raw") or {}).get("resource_id")
+                        or ""
+                    )
+                    if found:
+                        self._info("作业 %s 的 resource_id = %s", homework_id, found)
+                        return found
+        return ""
 
     def _download(self, url: str) -> bytes:
         cached = zipcrypto.cache_path_for(url)
@@ -679,13 +743,16 @@ class Completer:
         context = dict(question.context)
         context["order"] = str(question.order)
         context["serial_id"] = str(segment_index)
-        context["use_time"] = duration_ms
+        # The official client reports how long the answer took (in seconds).
+        # A zero here makes the server treat the answer as "not practised".
+        context["use_time"] = max(1, int(round((duration_ms or 0) / 1000.0)))
         context["correct"] = 1
 
         self.pacer.request()
         mark_error: Optional[EtsApiError] = None
         attempts = max(1, int(self.settings.get("mark_retries", 2) or 0) + 1)
         for attempt in range(1, attempts + 1):
+            self._check_cancel()
             try:
                 self.client.submit_audio(
                     token=token,
@@ -716,7 +783,7 @@ class Completer:
                     f"ETS 评分服务暂时不可用，{MARK_RETRY_DELAY_SECONDS} 秒后重试",
                     group=question.group_name,
                 )
-                time.sleep(MARK_RETRY_DELAY_SECONDS)
+                self._wait(MARK_RETRY_DELAY_SECONDS)
 
         unconfirmed = False
         if mark_error is not None:

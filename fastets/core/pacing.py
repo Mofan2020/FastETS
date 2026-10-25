@@ -34,6 +34,7 @@ class Pacer:
         min_reading_delay_ms: int = 800,
         max_reading_delay_ms: int = 9000,
         section_pause_ms: int = 1500,
+        stop_event: Optional[threading.Event] = None,
     ) -> None:
         self.enabled = enabled
         self.request_delay_ms = max(0, int(request_delay_ms))
@@ -44,7 +45,11 @@ class Pacer:
             self.min_reading_delay_ms, int(max_reading_delay_ms)
         )
         self.section_pause_ms = max(0, int(section_pause_ms))
-        self._stop = threading.Event()
+        # When an external event is given (the job runner's cancel flag), the
+        # pacer waits on that very event, so pressing "stop" wakes every sleep
+        # immediately instead of letting the run continue in the background.
+        self._owns_stop = stop_event is None
+        self._stop = stop_event if stop_event is not None else threading.Event()
 
     # -- control -------------------------------------------------------------
 
@@ -52,7 +57,10 @@ class Pacer:
         self._stop.set()
 
     def reset(self) -> None:
-        self._stop.clear()
+        # An external cancel flag belongs to the job runner: clearing it here
+        # would silently swallow a stop request.
+        if self._owns_stop:
+            self._stop.clear()
 
     @property
     def stopped(self) -> bool:
@@ -105,7 +113,7 @@ class Pacer:
         return self._sleep(self._jitter(self.section_pause_ms))
 
 
-def pacer_from_settings(settings: dict) -> Pacer:
+def pacer_from_settings(settings: dict, stop_event: Optional[threading.Event] = None) -> Pacer:
     return Pacer(
         enabled=bool(settings.get("pace_enabled", True)),
         request_delay_ms=int(settings.get("request_delay_ms", 400)),
@@ -114,4 +122,5 @@ def pacer_from_settings(settings: dict) -> Pacer:
         min_reading_delay_ms=int(settings.get("min_reading_delay_ms", 800)),
         max_reading_delay_ms=int(settings.get("max_reading_delay_ms", 9000)),
         section_pause_ms=int(settings.get("section_pause_ms", 1500)),
+        stop_event=stop_event,
     )

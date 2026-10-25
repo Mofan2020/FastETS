@@ -253,27 +253,14 @@ class AudioTools:
         }
 
     def duration_ms(self, source: Path) -> int:
-        """Duration of an audio file in milliseconds."""
-        try:
-            result = subprocess.run(
-                [
-                    self.ffmpeg.replace("ffmpeg", "ffprobe") if self.ffmpeg.endswith("ffmpeg") else "ffprobe",
-                    "-v",
-                    "error",
-                    "-show_entries",
-                    "format=duration",
-                    "-of",
-                    "default=noprint_wrappers=1:nokey=1",
-                    str(source),
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=60,
-            )
-            value = result.stdout.decode("utf-8", "replace").strip()
-            return int(float(value) * 1000) if value else 0
-        except Exception:
-            return 0
+        """Duration of an audio file in milliseconds.
+
+        The bundled binary is a plain ``ffmpeg`` without a sibling
+        ``ffprobe``, so the duration is read from ffmpeg's own output.  The old
+        ffprobe based probe always failed and silently reported 0 - which is
+        why every submission used to go out with ``use_time=0``.
+        """
+        return int(self.probe(source).get("duration_ms") or 0)
 
     # -- diagnostics ---------------------------------------------------------
 

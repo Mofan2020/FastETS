@@ -131,12 +131,21 @@ class JobRunner:
             try:
                 result = func(*args, **kwargs)
                 job.result = result
-                job.status = "succeeded"
-                job.message = "完成"
+                if self._cancel.is_set():
+                    # The user pressed "stop": the job did not really finish.
+                    job.status = "cancelled"
+                    job.message = "已取消"
+                else:
+                    job.status = "succeeded"
+                    job.message = "完成"
             except Exception as exc:  # noqa: BLE001 - surfaced to the UI
-                job.status = "failed"
-                job.error = str(exc)
-                job.message = f"失败: {exc}"
+                if self._cancel.is_set():
+                    job.status = "cancelled"
+                    job.message = "已取消"
+                else:
+                    job.status = "failed"
+                    job.error = str(exc)
+                    job.message = f"失败: {exc}"
                 if self._log:
                     self._log.error("job %s failed: %s", job.id, exc)
                     self._log.debug(traceback.format_exc())
@@ -154,7 +163,7 @@ class JobRunner:
         with self._lock:
             job = self._current
             self._cancel.set()
-        if job and job.status == "running":
+        if job and job.status in ("queued", "running"):
             job.status = "cancelled"
             job.message = "已取消"
             self._push({"type": "job", "job": job.to_dict()})

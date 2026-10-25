@@ -52,6 +52,14 @@ POST /m/audio/sync-v1
 `g/*` 命名空间是通配处理，任何子路由都先校验 Token（返回 `登录状态失效`），因此**无 Token 无法枚举**；
 `m/audio/*` 命名空间会区分不存在的路由，可以据此判断路由是否存在。
 
+### Token 会过期
+
+登录拿到的 token 不是永久有效的（实测同一份 token 存放几十分钟后
+`g/homework/list` 就返回 `code=20004 / ets的token过期`）。判定方式：
+`code == 20004`，或消息里出现「token过期」「登录状态失效」。FastETS 在遇到这类
+错误时会自动用记住的密码重新登录一次，然后重放原请求——所以长时间开着也不会
+突然全线失败。`user/login` 与 `user/rebind-code` 不参与自动刷新，避免死循环。
+
 ## 三、路由清单
 
 | 路由 | 作用 |
@@ -155,7 +163,7 @@ Auth     OSS <accessKeyId>:<HMAC-SHA1-base64(
 
 ```json
 {
-  "homework_id": "...", "use_time": 0, "resource_id": "55",
+  "homework_id": "...", "use_time": 3, "resource_id": "240",
   "serial_id": "0", "set_id": "...", "entity_id": "...", "order": "1",
   "score": "5.0", "correct": 1, "auto_submit": 1,
   "client_time": "2026-01-01 00:00:00", "version": 2, "graduation": 0,
@@ -168,6 +176,26 @@ Auth     OSS <accessKeyId>:<HMAC-SHA1-base64(
   "sn": "...", "sign_response": 2, "token": "...", "ets_app": 0, "is_zk_pad": 0
 }
 ```
+
+### resource_id —— 最容易踩的坑
+
+`resource_id` **不是**固定的 55，而是**这份作业自己的**资源 id，来自
+`g/homework/list` 返回的作业行顶层字段 `resource_id`（实测 `(新教材)8年级(上)U3A`
+是 `240`，`set_id` 是 `614336`）。
+
+内容包里的 `content.json` **没有** `resource_id` 字段（只有 `stid`），所以只能从
+作业列表拿。发错 id 的后果是：附件都上传成功、`sync-v2` 也发出去了，但服务端按
+resource_id 去找评测服务配置时找不到，返回 **`远程获取ets服务失败`**，整份作业
+每一题都「失败」，而作业在官方 App 里始终显示未完成。
+
+> 公开实现 `HULU53/EPlus_Windows` 也在这里写死了 `ETS_EVALUATE_RESOURCE_ID`，
+> 属于同一个坑。FastETS 从作业行透传真实 id，缺失时才回落到默认值。
+
+### use_time
+
+`use_time` 是这道题的**实际耗时（秒）**。官方客户端一定会带上，不能是 0——
+否则服务端可能把这次作答当成「没有练习过」。注意随包附带的 ffmpeg **没有**
+ffprobe，用 `ffprobe` 探测时长会静默返回 0，必须用 `ffmpeg -i` 的输出解析。
 
 选择题用同一个路由，但 `upload_file_url` / `spx_file_url` / `detail_file_url` 留空，
 `upload_file_id` 固定为 `"0"`，并在 `score_detail.choose` 里带上所选项。

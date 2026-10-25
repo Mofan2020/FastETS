@@ -63,11 +63,16 @@ class EtsApiClient:
         timeout: int = 30,
         verify_ssl: bool = True,
         logger=None,
+        token_refresher=None,
     ) -> None:
         self.protocol = protocol
         self.timeout = timeout
         self.verify_ssl = verify_ssl
         self._log = logger
+        # Optional callback that returns a fresh token.  ETS tokens expire after
+        # a while; without this the whole run dies with "ets的token过期" even
+        # though the account is fine.
+        self._token_refresher = token_refresher
         self.session = requests.Session()
         self.session.headers.update(
             {"User-Agent": config.ETS_USER_AGENT, "Accept": "*/*"}
@@ -91,6 +96,40 @@ class EtsApiClient:
         query: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """POST a signed envelope to ``route`` and return the parsed response."""
+        payload = self._raw_request(route, params, query)
+        refreshable = route not in (ROUTE_LOGIN, ROUTE_REBIND) and bool(params.get("token"))
+        if refreshable and self._is_token_expired(payload) and self._token_refresher is not None:
+            fresh = ""
+            try:
+                fresh = str(self._token_refresher() or "")
+            except Exception as exc:  # noqa: BLE001 - refresh is best effort
+                self._log_info("token 刷新失败: %s", exc)
+            if fresh:
+                self._log_info("token 已过期，自动重新登录后重试 /%s", route)
+                params = dict(params)
+                params["token"] = fresh
+                payload = self._raw_request(route, params, query)
+        return self._check_payload(payload, route, allow_codes)
+
+    @staticmethod
+    def _is_token_expired(payload: Dict[str, Any]) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        try:
+            code = int(payload.get("code") or 0)
+        except (TypeError, ValueError):
+            code = 0
+        if code == CODE_TOKEN_EXPIRED:
+            return True
+        message = str(payload.get("msg") or "")
+        return "token过期" in message or "登录状态失效" in message
+
+    def _raw_request(
+        self,
+        route: str,
+        params: Dict[str, Any],
+        query: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         envelope = crypto.build_envelope(route, params)
         url = f"{config.ETS_API_BASE_URL}/{route}"
         if query:
@@ -133,7 +172,14 @@ class EtsApiClient:
             payload = payload[0]
         if not isinstance(payload, dict):
             raise EtsApiError(f"/{route} 返回格式不正确", route=route)
+        return payload
 
+    def _check_payload(
+        self,
+        payload: Dict[str, Any],
+        route: str,
+        allow_codes: Optional[List[int]] = None,
+    ) -> Dict[str, Any]:
         code = payload.get("code")
         if code not in (None, "", 0, "0"):
             message = str(payload.get("msg") or f"业务错误 code={code}")
@@ -339,6 +385,10 @@ class EtsApiClient:
                     "name": str(row.get("name", "未命名作业")),
                     "status": status,
                     "set_id": str(row.get("set_id", "")),
+                    # The server looks the marking service up by resource_id.
+                    # Sending the wrong one (or the generic default) makes every
+                    # submission fail with "远程获取ets服务失败".
+                    "resource_id": str(row.get("resource_id", "")),
                     "parent_homework_id": str(row.get("parent_homework_id", "")),
                     "group_name": str(row.get("group_name", "")),
                     "contents": [
@@ -347,6 +397,9 @@ class EtsApiClient:
                                 entry.get("group_name") or entry.get("groupName") or ""
                             ),
                             "url": str(entry.get("url") or ""),
+                            "real_id": str(entry.get("real_id", "")),
+                            "entity_type": str(entry.get("entity_type", "")),
+                            "read_type": str(entry.get("read_type", "")),
                         }
                         for entry in (contents or [])
                         if isinstance(entry, dict)
