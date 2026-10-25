@@ -14,6 +14,10 @@ The known families are:
 ``collector.dialogue``           回答问题
 ``collector.read``               模仿朗读 / 短文朗读
 ===============================  ==========================================
+
+Structures that are not in this list are handled by a generic splitter: if
+``info`` carries a list of items the pack becomes one question per item
+instead of a single question for the whole pack.  See :func:`_find_item_entries`.
 """
 
 from __future__ import annotations
@@ -24,6 +28,48 @@ import re
 from typing import Any, Dict, List, Optional
 
 from .. import config
+
+# The structure types that are parsed explicitly.  Everything else goes
+# through the generic item splitter.
+KNOWN_STRUCTURE_TYPES = frozenset(
+    {
+        "collector.choose",
+        "collector.fill",
+        "collector.role",
+        "collector.3q5a",
+        "collector.dialogue",
+        "collector.picture",
+        "collector.read",
+    }
+)
+
+# ``info`` keys that hold a list of questions / items.
+_ITEM_LIST_KEYS = (
+    "question",
+    "sublist",
+    "exam_info",
+    "items",
+    "list",
+    "word",
+    "words",
+)
+# Keys that may hold a list of items, but only when the entries carry their
+# own number - there they can also be the alternative answers of one question.
+_WEAK_ITEM_LIST_KEYS = ("std", "xtlist")
+# Keys that carry the number of an item.
+_ITEM_NUMBER_KEYS = ("seq", "xh", "xth", "xt_xh", "num", "no", "index")
+# Keys that carry the text of an item.
+_ITEM_TEXT_KEYS = (
+    "value",
+    "text",
+    "content",
+    "topic",
+    "ask",
+    "question",
+    "word",
+)
+# Keys that carry the answers of an item.
+_ITEM_ANSWER_KEYS = ("std", "answer", "answers")
 
 # --- text helpers ------------------------------------------------------------
 
@@ -123,6 +169,81 @@ def _as_int(value: Any, default: int) -> int:
         return default
 
 
+def is_known_structure(structure_type: str) -> bool:
+    """Whether the structure type is parsed explicitly."""
+    return str(structure_type or "") in KNOWN_STRUCTURE_TYPES
+
+
+# --- generic item splitting ----------------------------------------------------
+
+
+def _entry_number(entry: Dict[str, Any], index: int) -> int:
+    """The number of an item (``seq`` / ``xh`` / ``xth`` ...)."""
+    for key in _ITEM_NUMBER_KEYS:
+        number = _as_int(entry.get(key), 0)
+        if number > 0:
+            return number
+    return index + 1
+
+
+def _entry_text(entry: Dict[str, Any]) -> str:
+    """The readable text of an item."""
+    for key in _ITEM_TEXT_KEYS:
+        text = clean_text(entry.get(key))
+        if text:
+            return text
+    return ""
+
+
+def _entry_answers(entry: Dict[str, Any]) -> List[str]:
+    """The answers of an item (a list, they are alternatives)."""
+    raw: Any = None
+    for key in _ITEM_ANSWER_KEYS:
+        if entry.get(key):
+            raw = entry.get(key)
+            break
+    if raw is None:
+        return []
+    if isinstance(raw, (str, bytes)):
+        value = clean_text(raw)
+        return [value] if value else []
+    if not isinstance(raw, list):
+        return []
+    answers: List[str] = []
+    for item in raw:
+        value = clean_text(item.get("value") if isinstance(item, dict) else item)
+        if value:
+            answers.append(value)
+    return answers
+
+
+def _find_item_entries(info: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The list of items inside ``info``, if the pack has one.
+
+    The strong keys (``sublist`` and friends) always describe a list of
+    items.  The weak keys (``std`` / ``xtlist``) are only used when the
+    entries carry their own number, because there they can also be the
+    alternative answers of a single question (``collector.picture``).
+    """
+    for key in _ITEM_LIST_KEYS:
+        raw = info.get(key)
+        if not isinstance(raw, list) or not raw:
+            continue
+        entries = [item for item in raw if isinstance(item, dict)]
+        if entries:
+            return entries
+    for key in _WEAK_ITEM_LIST_KEYS:
+        raw = info.get(key)
+        if not isinstance(raw, list) or not raw:
+            continue
+        entries = [item for item in raw if isinstance(item, dict)]
+        if not entries:
+            continue
+        if any(any(name in entry for name in _ITEM_NUMBER_KEYS) for entry in entries):
+            return entries
+    return []
+
+
 # --- questions ----------------------------------------------------------------
 
 
@@ -146,6 +267,7 @@ class Question:
         max_score: float = 5.0,
         read_text: str = "",
         answer_candidates: Optional[List[str]] = None,
+        single_recording: bool = False,
     ) -> None:
         self.id = question_id
         self.homework_id = homework_id
@@ -164,6 +286,11 @@ class Question:
         # 复述 / 表达 / 交际应答这类题型在资源包里带多份「示例答案」，朗读时
         # 需要从里面挑一份（第一个 / 随机 / 手动选择）。
         self.answer_candidates = [c for c in (answer_candidates or []) if c]
+        # One question = one recording.  Used by the generic splitter, where
+        # the shape of the pack is unknown and the text must not be split
+        # into sentences (that would create several records for one
+        # question and the completion would never reach 100%).
+        self.single_recording = bool(single_recording)
 
     # -- classification -----------------------------------------------------
 
@@ -227,6 +354,8 @@ class Question:
         if kind in ("短文朗读", "模仿朗读", "信息转述") or self.is_response:
             # One recording for the whole passage / the whole answer.
             return [text]
+        if self.single_recording:
+            return [text]
         sentences = split_sentences(text)
         if kind in ("逐句跟读", "朗读"):
             return sentences
@@ -250,6 +379,7 @@ class Question:
             "max_score": self.max_score,
             "needs_audio": self.needs_audio,
             "answer_candidates": self.answer_candidates,
+            "single_recording": self.single_recording,
             "context": self.context,
         }
 
@@ -451,6 +581,42 @@ def parse_content_json(
                 read_text=read_text,
             )
         )
+        return Section(group_name, structure_type, questions)
+
+    # An unknown structure type: if the pack carries a list of items, split it
+    # into one question per item.  Without this the whole pack would be
+    # recorded as a single answer and the assignment could never reach 100%.
+    entries = (
+        _find_item_entries(info) if not is_known_structure(structure_type) else []
+    )
+    if entries:
+        for index, entry in enumerate(entries):
+            number = _entry_number(entry, index)
+            order = order_offset + number
+            answers = _entry_answers(entry)
+            text = _entry_text(entry)
+            prompt = clean_text(
+                entry.get("ask") or entry.get("question") or entry.get("topic")
+            )
+            questions.append(
+                Question(
+                    question_id=_question_id(homework_id, content_url, order, ":item"),
+                    homework_id=homework_id,
+                    content_url=content_url,
+                    order=order,
+                    group_name=group_name,
+                    structure_type=structure_type,
+                    question_text=prompt or text,
+                    answers=answers,
+                    context=_make_context(payload, homework_id, order, context_base),
+                    original_text=text,
+                    max_score=max_score,
+                    # The answers are alternatives, so one of them is read.
+                    read_text=answers[0] if answers else text,
+                    answer_candidates=list(answers) if len(answers) > 1 else None,
+                    single_recording=True,
+                )
+            )
         return Section(group_name, structure_type, questions)
 
     # Fallback: 模仿朗读 / 短文朗读 and anything unknown.

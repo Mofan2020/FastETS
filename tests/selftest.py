@@ -711,6 +711,100 @@ def test_log_redaction() -> None:
     check("other params kept", redacted.get("homework_id") == "h1")
 
 
+def test_generic_item_splitting() -> None:
+    """An unknown structure type is split into its items, not one answer.
+
+    The concrete type names of the packs we have not seen yet (课后作业,
+    单词作业, ...) are unknown, so the parser works on the *shape* of the
+    data: a list of items under ``info`` becomes one question per item.
+    """
+    from fastets.core import paper as paper_mod
+
+    # A pack that carries its items under "sublist" with a "seq" number.
+    payload = {
+        "structure_type": "collector.repeat_essay",
+        "info": {
+            "sublist": [
+                {"seq": 1, "value": "The first item to read aloud."},
+                {"seq": 2, "value": "The second item to read aloud."},
+                {"seq": 3, "value": "The third item to read aloud."},
+            ]
+        },
+    }
+    section = paper_mod.parse_content_json(payload, "hw", "/f.zip", "课后作业")
+    check("unknown type is not a known structure", not paper_mod.is_known_structure("collector.repeat_essay"))
+    check("the pack becomes one question per item", len(section.questions) == 3, str(len(section.questions)))
+    check(
+        "the item number comes from seq",
+        [q.order for q in section.questions] == [1, 2, 3],
+        str([q.order for q in section.questions]),
+    )
+    check(
+        "the item text is read",
+        section.questions[0].read_text == "The first item to read aloud.",
+        section.questions[0].read_text,
+    )
+    check(
+        "one recording per item",
+        all(len(q.speech_segments()) == 1 for q in section.questions),
+        str([len(q.speech_segments()) for q in section.questions]),
+    )
+
+    # A pack that carries questions with alternatives (ask + std).
+    dialogue_like = {
+        "structure_type": "collector.whatever",
+        "info": {
+            "question": [
+                {"ask": "<p>How are you?</p>", "std": [{"value": "I am fine."}, {"value": "Not bad."}]},
+                {"ask": "<p>Where are you?</p>", "std": [{"value": "I am at school."}]},
+            ]
+        },
+    }
+    parsed = paper_mod.parse_content_json(dialogue_like, "hw", "/g.zip", "快速问答")
+    check("question list becomes one question per entry", len(parsed.questions) == 2, str(len(parsed.questions)))
+    check(
+        "the alternatives become candidates",
+        list(parsed.questions[0].answer_candidates) == ["I am fine.", "Not bad."],
+        str(parsed.questions[0].answer_candidates),
+    )
+    check(
+        "the prompt is not read",
+        parsed.questions[0].read_text == "I am fine.",
+        parsed.questions[0].read_text,
+    )
+    check(
+        "one recording per question",
+        len(parsed.questions[0].speech_segments()) == 1,
+        str(parsed.questions[0].speech_segments()),
+    )
+
+    # The known types must not change: collector.picture keeps one question
+    # with alternative answers, collector.read keeps its single passage.
+    picture = paper_mod.parse_content_json(
+        {
+            "structure_type": "collector.picture",
+            "info": {"std": [{"value": "One."}, {"value": "Two."}], "value": "source"},
+        },
+        "hw",
+        "/h.zip",
+        "信息转述",
+    )
+    check("picture stays one question", len(picture.questions) == 1, str(len(picture.questions)))
+    check(
+        "picture keeps its alternatives",
+        list(picture.questions[0].answer_candidates) == ["One.", "Two."],
+        str(picture.questions[0].answer_candidates),
+    )
+    read = paper_mod.parse_content_json(
+        {"structure_type": "collector.read", "info": {"value": "A passage."}},
+        "hw",
+        "/i.zip",
+        "短文朗读",
+    )
+    check("read stays one question", len(read.questions) == 1, str(len(read.questions)))
+    check("read keeps its text", read.questions[0].read_text == "A passage.", read.questions[0].read_text)
+
+
 def test_speex_frames() -> None:
     """The raw Speex payload must survive a wrap/unwrap round trip."""
     from fastets.core import audio as audio_mod
@@ -1538,6 +1632,7 @@ def main() -> int:
         test_completer_offline,
         test_serial_id_per_pack,
         test_response_candidates,
+        test_generic_item_splitting,
         test_log_redaction,
         test_config,
         test_live_api,

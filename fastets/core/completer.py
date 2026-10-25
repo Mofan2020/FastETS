@@ -374,6 +374,16 @@ class Completer:
             )
             sections.append(section)
             offsets[group_name] = offset + len(section.questions)
+            structure_type = str(payload.get("structure_type") or "")
+            if not paper_mod.is_known_structure(structure_type):
+                # Worth a log line: the type name is what is needed to write an
+                # exact parser for this pack shape.
+                self._info(
+                    "未识别的题型结构 %s（%s），已按通用规则拆成 %d 道题",
+                    structure_type or "(空)",
+                    group_name or "未命名大题",
+                    len(section.questions),
+                )
 
         return LoadedPaper(homework, sections)
 

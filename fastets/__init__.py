@@ -7,5 +7,5 @@ the required speech with a cloned voice, and submits the result.
 See README.md for the full disclaimer and the terms you accept on first launch.
 """
 
-__version__ = "1.0.4"
+__version__ = "1.0.5"
 __all__ = ["__version__"]

@@ -143,6 +143,28 @@ password       = MD5(seed).upper() + MD5(上述大写 hex 的 ASCII).upper()
 
 文本清洗：`ets_th{数字}` 前缀、HTML 标签、零宽字符 `\u200B`、`</p><p>` → 换行。
 
+### 未知 structure_type 的通用拆分
+
+上面 7 种是公开实现（`laststudio/Fuck_ets100` 的 API 文档、`banglee13/Fuck_ets100_win`、
+`HULU53/EPlus_Windows`）与本地真实资源包都能对上的类型。**除此之外的类型名目前没有
+任何可核实的出处**——本地缓存里只出现过 `collector.read` / `collector.picture` /
+`collector.dialogue` 三种，公开仓库与检索里也搜不到 `collector.repeat_essay` 之类
+的名字。所以 FastETS 不去猜题型名，而是按**数据结构**兜底：
+
+只要 `info` 里带一份条目列表（`question` / `sublist` / `exam_info` / `items` /
+`list` / `word` / `words`），就拆成「一个条目一道题」；条目里的答案列表
+（`std` / `answer`）当作**备选答案**，只读其中一份；题号优先取 `seq` / `xh` /
+`xth` / `num` / `no` / `index`，取不到就用顺序。`std` / `xtlist` 这两个键只有
+在条目自带题号时才会被当成列表——在 `collector.picture` 里它们是同一道题的
+多份备选答案，不能拆。
+
+这样做解决的是「整包只记一条」：一包 N 道题只落库 1 条，完成度必然上不去。
+拆出来的题强制「一道题一条录音」，避免一句答案被切成多句后落成多条记录。
+
+遇到没见过的题型时，程序会在日志里打一行
+`未识别的题型结构 <type>（<大题名>），已按通用规则拆成 N 道题`，
+把类型名和包名记下来——拿到真实样本后就能据此写精确解析。
+
 ## 七、上传与回传
 
 1. 取 OSS 临时凭证：
