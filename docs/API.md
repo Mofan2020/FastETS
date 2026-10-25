@@ -177,7 +177,7 @@ Auth     OSS <accessKeyId>:<HMAC-SHA1-base64(
 | 附件 | 生成方式 |
 |------|----------|
 | mp3 | ffmpeg `-ac 1 -ar 16000 -codec:a libmp3lame -q:a 4` |
-| speex | ffmpeg `-codec:a libspeex -f spx`，再从 Ogg 容器里抽出裸 Speex 帧（跳过前 3 个包头） |
+| speex | 裸 Speex 帧（没有容器）。ffmpeg ≤5.x 可用 `-codec:a libspeex -f spx` 再从 Ogg 容器里抽出裸帧；**ffmpeg ≥6.0 已删除 `libspeex` 编码器**，FastETS 改为调用自带的 `speexenc_raw`（静态链接 libspeex 1.2.1），其输出与 ffmpeg 5.x 的 `libspeex` 逐字节相同 |
 | xml | 讯飞评测结果 XML（见下） |
 
 ## 八、评测分数 XML

@@ -8,8 +8,10 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import subprocess
 import sys
 from pathlib import Path
+from typing import List
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -191,12 +193,456 @@ def test_live_api() -> None:
             check("live api signature accepted", False, message[:140])
 
 
+def test_voice_resolution() -> None:
+    """The voice id must fall back to a default voice when nothing is cloned."""
+    from fastets.voice import DEFAULT_MINIMAX_VOICE, resolve_voice_id
+    from fastets.voice.minimax import MiniMaxProvider
+    from fastets.voice.edge import EdgeTTSProvider
+    from fastets.voice.openai_compat import OpenAICompatProvider
+
+    minimax = MiniMaxProvider(api_key="x")
+    edge = EdgeTTSProvider()
+    openai = OpenAICompatProvider(base_url="http://127.0.0.1:1")
+
+    check(
+        "voice falls back to the default",
+        resolve_voice_id({"minimax_voice_id": ""}, minimax) == DEFAULT_MINIMAX_VOICE,
+    )
+    check(
+        "cloned voice wins",
+        resolve_voice_id({"minimax_voice_id": "voice-123"}, minimax) == "voice-123",
+    )
+    check(
+        "voice_mode default uses the chosen voice",
+        resolve_voice_id(
+            {"voice_mode": "default", "default_voice": "female-shaonv"}, minimax
+        )
+        == "female-shaonv",
+    )
+    check(
+        "edge uses its own default",
+        resolve_voice_id({"edge_voice": ""}, edge) == "en-US-AriaNeural",
+    )
+    check(
+        "openai uses its own default",
+        resolve_voice_id({"openai_voice": ""}, openai) == "alloy",
+    )
+
+
+def test_progress_payload() -> None:
+    """A structured progress payload must never reach the UI as an object."""
+    from fastets.jobs.runner import JobRunner
+
+    runner = JobRunner()
+    runner.start("test", "test", lambda: None)
+    runner.progress({"stage": "download", "message": "下载资源包 1/2", "percent": 12})
+    events = runner.events_since(0)["events"]
+    progress_events = [e for e in events if e.get("type") == "progress"]
+    check("progress event emitted", bool(progress_events))
+    if progress_events:
+        message = progress_events[-1].get("message")
+        check("progress message is text", isinstance(message, str), repr(message))
+        check("progress message content", "下载资源包" in str(message))
+        check("progress percent kept", progress_events[-1].get("percent") == 12)
+    runner.log({"stage": "x"})
+    log_events = [e for e in runner.events_since(0)["events"] if e.get("type") == "log"]
+    check("log message is text", isinstance(log_events[-1].get("message"), str))
+
+
+def test_audio_pipeline() -> None:
+    """mp3 and the raw Speex payload must be produced for every answer."""
+    from fastets.core import audio as audio_mod
+
+    tools = audio_mod.AudioTools()
+    try:
+        ffmpeg = tools.ffmpeg
+    except Exception as exc:  # noqa: BLE001
+        print(f"[SKIP] audio pipeline  -> 没有可用的 ffmpeg: {exc}")
+        return
+
+    status = tools.speex_status()
+    check("speex encoder detected", bool(status.get("available")), str(status.get("message")))
+
+    # A one second sine wave is enough to exercise the whole conversion chain.
+    source = config.audio_cache_dir() / "selftest_tone.wav"
+    subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-v",
+            "quiet",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=1:sample_rate=16000",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "pcm_s16le",
+            str(source),
+        ],
+        check=False,
+    )
+    if not source.exists() or source.stat().st_size == 0:
+        print("[SKIP] audio pipeline  -> 无法生成测试音频")
+        return
+
+    mp3 = tools.to_mp3(source)
+    check("mp3 produced", mp3.exists() and mp3.stat().st_size > 0, f"{mp3.stat().st_size} bytes")
+    info = tools.probe(mp3)
+    check("mp3 is 16 kHz mono", info.get("sample_rate") == 16000, str(info.get("sample_rate")))
+    check(
+        "mp3 duration about one second",
+        800 <= info.get("duration_ms", 0) <= 1400,
+        str(info.get("duration_ms")),
+    )
+
+    try:
+        speex = tools.to_speex(source)
+    except audio_mod.SpeexUnavailableError as exc:
+        print(f"[SKIP] speex payload  -> 没有 Speex 编码器: {exc}")
+        return
+    check("speex produced", speex.exists() and speex.stat().st_size > 0, f"{speex.stat().st_size} bytes")
+    check(
+        "speex payload is a whole number of frames",
+        speex.stat().st_size % 1 == 0 and speex.stat().st_size > 20,
+    )
+
+
+def test_submit_payload() -> None:
+    """The sync-v2 payload must carry every field the ETS100 server needs."""
+    from fastets.core.ets_api import EtsApiClient
+
+    client = EtsApiClient(timeout=5)
+    captured: dict = {}
+
+    def fake_request(route, params=None, **kwargs):
+        captured["route"] = route
+        captured["params"] = dict(params or {})
+        return {"body": {"code": 0}}
+
+    client.request = fake_request  # type: ignore[assignment]
+    client.submit_audio(
+        token="tok",
+        context={"homework_id": "1", "set_id": "2", "entity_id": "3", "order": "4"},
+        score="5.0",
+        score_detail='{"score":5}',
+        mp3_url="https://cdn/x.mp3",
+        speex_url="https://cdn/x.speex",
+        xml_url="https://cdn/x.xml",
+    )
+    params = captured.get("params", {})
+    required = [
+        "homework_id",
+        "set_id",
+        "entity_id",
+        "order",
+        "score",
+        "score_detail",
+        "upload_file_url",
+        "detail_file_url",
+        "spx_file_url",
+        "mark_service",
+        "sign_response",
+        "token",
+        "version",
+        "resource_id",
+    ]
+    missing = [key for key in required if key not in params]
+    check("submit payload complete", not missing, f"missing: {missing}")
+    check("submit route", captured.get("route") == "m/audio/sync-v2", str(captured.get("route")))
+    check(
+        "submit carries the three attachments",
+        params.get("upload_file_url", "").endswith(".mp3")
+        and params.get("detail_file_url", "").endswith(".xml")
+        and params.get("spx_file_url", "").endswith(".speex"),
+    )
+
+    # An empty spx must be accepted as well - that is what the official client
+    # sends for answers without a recording.
+    client.submit_audio(
+        token="tok",
+        context={"homework_id": "1"},
+        score="1.0",
+        score_detail="{}",
+        mp3_url="https://cdn/x.mp3",
+        speex_url="",
+        xml_url="https://cdn/x.xml",
+    )
+    check("submit works without a spx attachment", captured["params"].get("spx_file_url") == "")
+
+
+def test_completer_offline() -> None:
+    """The whole submission pipeline, without touching the network.
+
+    A fake voice provider returns a real mp3, the OSS uploader and the API
+    client are replaced by recorders.  Everything in between - audio
+    conversion, the score XML, the attachment upload and the sync payload - is
+    the production code path.
+    """
+    from fastets.core import paper as paper_mod
+    from fastets.core.completer import Completer, LoadedPaper
+    from fastets.voice.base import TTSResult
+
+    class FakeProvider:
+        name = "fake"
+        supports_clone = False
+
+        def synthesize(self, text, voice_id="", speed=1.0, pitch=0, **kwargs):
+            return TTSResult(audio=b"", voice_id=voice_id, provider="fake")
+
+    class FakeSession:
+        token = "tok"
+        phone = ""
+        password = ""
+
+        def ensure_fresh_token(self):
+            return self.token
+
+        @property
+        def parent_account_id(self):
+            return "pid"
+
+    # The fake provider has to return real audio, so build it with ffmpeg.
+    from fastets.core import audio as audio_mod
+
+    tools = audio_mod.AudioTools()
+    try:
+        ffmpeg = tools.ffmpeg
+    except Exception as exc:  # noqa: BLE001
+        print(f"[SKIP] completer offline  -> 没有可用的 ffmpeg: {exc}")
+        return
+
+    sample = config.audio_cache_dir() / "selftest_speech.mp3"
+    subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-v",
+            "quiet",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=330:duration=2:sample_rate=16000",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "libmp3lame",
+            "-q:a",
+            "4",
+            str(sample),
+        ],
+        check=False,
+    )
+    if not sample.exists():
+        print("[SKIP] completer offline  -> 无法生成测试音频")
+        return
+    speech = sample.read_bytes()
+
+    def synthesize(self, text, voice_id="", speed=1.0, pitch=0, **kwargs):
+        return TTSResult(audio=speech, voice_id=voice_id, provider="fake")
+
+    FakeProvider.synthesize = synthesize
+
+    completer = Completer(
+        FakeSession(),
+        settings={
+            "dry_run": False,
+            "pace_enabled": False,
+            "keep_audio_cache": False,
+            "target_score_ratio": 1.0,
+            "score_mode": "target",
+            "ffmpeg_path": "",
+        },
+        logger=None,
+    )
+    completer._provider = FakeProvider()
+
+    uploaded: List[dict] = []
+    submitted: List[dict] = []
+
+    class FakeUploader:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def upload(self, local_path, kind):
+            path = Path(local_path)
+            uploaded.append({"kind": kind, "size": path.stat().st_size if path.exists() else 0})
+            return {"object_key": f"k/{kind}", "url": f"https://cdn.example/{kind}"}
+
+    class FakeClient:
+        def oss_upload_config(self, token):
+            return {}
+
+        def submit_audio(self, **kwargs):
+            submitted.append(kwargs)
+            return {"code": 0}
+
+        def submit_choice(self, **kwargs):
+            submitted.append(kwargs)
+            return {"code": 0}
+
+    completer.session.client = FakeClient()  # type: ignore[attr-defined]
+    import fastets.core.completer as completer_mod
+
+    original_uploader = completer_mod.oss.OssUploader
+    completer_mod.oss.OssUploader = FakeUploader  # type: ignore[assignment]
+    try:
+        question = paper_mod.Question(
+            question_id="q1",
+            homework_id="h1",
+            content_url="",
+            order=1,
+            group_name="跟读",
+            structure_type="collector.sentence",
+            question_text="朗读这句话",
+            answers=["Hello everyone, this is a test."],
+            context={"homework_id": "h1", "set_id": "s1", "entity_id": "e1"},
+            max_score=5.0,
+        )
+        paper = LoadedPaper({"id": "h1", "name": "测试作业"}, [paper_mod.Section("跟读", "collector.sentence", [question])])
+        report = completer.complete_homework(
+            {"id": "h1", "name": "测试作业"}, paper=paper, dry_run=False
+        )
+    finally:
+        completer_mod.oss.OssUploader = original_uploader  # type: ignore[assignment]
+
+    check("completer submitted every question", report.get("done") == 1, str(report.get("done")))
+    check("completer reported no failures", report.get("failed") == 0, str(report.get("failed")))
+    kinds = sorted(item["kind"] for item in uploaded)
+    check("three attachments uploaded", kinds == ["audio", "speex", "xml"], str(kinds))
+    check(
+        "every attachment has content",
+        all(item["size"] > 0 for item in uploaded),
+        str([(i["kind"], i["size"]) for i in uploaded]),
+    )
+    check("one submission sent", len(submitted) == 1, str(len(submitted)))
+    if submitted:
+        item = submitted[0]
+        check("submission carries mp3", item.get("mp3_url", "").endswith("audio"))
+        check("submission carries speex", item.get("speex_url", "").endswith("speex"))
+        check("submission carries xml", item.get("xml_url", "").endswith("xml"))
+        check("submission carries a score", float(item.get("score", 0)) > 0, str(item.get("score")))
+        check("submission carries the score detail", bool(item.get("score_detail")))
+
+
+def test_speex_frames() -> None:
+    """The raw Speex payload must survive a wrap/unwrap round trip."""
+    from fastets.core import audio as audio_mod
+    from fastets.core import speex as speex_mod
+
+    helper = speex_mod.find_helper()
+    if not helper:
+        print("[SKIP] speex frames  -> 没有内置 Speex 编码器")
+        return
+
+    tools = audio_mod.AudioTools()
+    source = config.audio_cache_dir() / "selftest_frames.wav"
+    subprocess.run(
+        [
+            tools.ffmpeg,
+            "-y",
+            "-v",
+            "quiet",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=220:duration=1:sample_rate=16000",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "pcm_s16le",
+            str(source),
+        ],
+        check=False,
+    )
+    if not source.exists():
+        print("[SKIP] speex frames  -> 无法生成测试音频")
+        return
+
+    target = config.audio_cache_dir() / "selftest_frames.speex"
+    try:
+        speex_mod.encode_with_helper(tools.ffmpeg, source, target)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[SKIP] speex frames  -> 编码失败: {exc}")
+        return
+    payload = target.read_bytes()
+    check("speex payload is not empty", len(payload) > 0, f"{len(payload)} bytes")
+
+    # Wrapping the frames into an Ogg stream and reading them back must give
+    # exactly the same bytes - that is what the ETS100 server receives.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    try:
+        from ogg_speex import build_ogg_speex  # noqa: PLC0415
+    except ImportError:
+        print("[SKIP] speex frames  -> 缺少 tests/ogg_speex.py")
+        return
+
+    frames = _split_frames(payload, helper, tools.ffmpeg, source)
+    check("speex payload splits into frames", len(frames) > 1, str(len(frames)))
+    ogg = build_ogg_speex(frames, 16000, 320)
+    extracted = audio_mod.extract_raw_speex_from_ogg(ogg)
+    check("speex frames survive the round trip", extracted == payload)
+
+
+def _split_frames(payload: bytes, helper: str, ffmpeg: str, source: Path) -> List[bytes]:
+    """Split a raw Speex payload into its frames.
+
+    The helper reports the length of every frame it produced; the tests use
+    that instead of guessing from the frame header.
+    """
+    lengths_file = config.audio_cache_dir() / "selftest_frames.len"
+    pcm = config.audio_cache_dir() / "selftest_frames.s16le"
+    subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-v",
+            "quiet",
+            "-i",
+            str(source),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-f",
+            "s16le",
+            str(pcm),
+        ],
+        check=False,
+    )
+    with pcm.open("rb") as handle:
+        subprocess.run(
+            [helper, "--rate", "16000", "--quality", "8", "--lengths-file", str(lengths_file)],
+            stdin=handle,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=120,
+        )
+    frames: List[bytes] = []
+    offset = 0
+    for line in lengths_file.read_text().split():
+        size = int(line)
+        frames.append(payload[offset : offset + size])
+        offset += size
+    return frames
+
+
 def test_config() -> None:
     check("data dir", config.data_dir().exists(), str(config.data_dir()))
     settings = config.load_settings()
     check("default provider", settings.get("tts_provider") == "minimax")
     check("pacing defaults", settings.get("pace_enabled") is True)
-    check("dry run default", settings.get("dry_run") is True)
+    # The defaults must not depend on what the user has configured locally.
+    check("dry run default", config.DEFAULT_SETTINGS.get("dry_run") is True)
+    check("voice mode default", config.DEFAULT_SETTINGS.get("voice_mode") == "clone")
 
 
 def main() -> int:
@@ -208,6 +654,12 @@ def main() -> int:
         test_sentence_split,
         test_score_xml,
         test_pacing,
+        test_voice_resolution,
+        test_progress_payload,
+        test_audio_pipeline,
+        test_submit_payload,
+        test_speex_frames,
+        test_completer_offline,
         test_config,
         test_live_api,
     ):

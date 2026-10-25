@@ -12,8 +12,6 @@ const state = {
   papers: {},
   seq: 0,
   polling: false,
-  recording: null,
-  meterTimer: null,
   tab: 'account',
 };
 
@@ -22,13 +20,23 @@ const PAGE_TITLES = {
 };
 
 /* ------------------------------------------------------------------ utils */
+function formatValue(value) {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'object') {
+    try { return JSON.stringify(value); } catch (err) { return String(value); }
+  }
+  return String(value);
+}
+
 function log(message, level = 'info') {
   const body = $('#log-body');
   const stamp = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-  body.textContent += `[${stamp}] ${message}\n`;
+  const text = formatValue(message);
+  body.textContent += `[${stamp}] ${text}\n`;
   body.scrollTop = body.scrollHeight;
   if (body.classList.contains('hidden')) body.classList.remove('hidden');
-  $('#log-title').textContent = message;
+  $('#log-title').textContent = text;
 }
 
 function setStatus(text) { $('#status-text').textContent = text; }
@@ -299,6 +307,63 @@ $('#btn-stop').addEventListener('click', async () => {
   if (result.ok && result.stopped) log('已请求停止当前任务');
 });
 
+/* --------------------------------------------------------------- voice page */
+function syncVoiceMode() {
+  const mode = $('#voice-mode').value;
+  $('#voice-clone-box').classList.toggle('hidden', mode !== 'clone');
+  $('#voice-default-box').classList.toggle('hidden', mode !== 'default');
+  const voiceId = state.settings.tts_provider === 'openai_compat'
+    ? state.settings.openai_voice
+    : state.settings.tts_provider === 'edge'
+      ? state.settings.edge_voice
+      : state.settings.minimax_voice_id;
+  $('#side-voice').textContent = mode === 'default'
+    ? '默认音色'
+    : (voiceId ? '已克隆' : '未克隆');
+}
+
+$('#voice-mode').addEventListener('change', async () => {
+  syncVoiceMode();
+  await saveVoicePreferences();
+});
+
+$('#set-default-voice').addEventListener('change', () => { saveVoicePreferences(); });
+
+async function saveVoicePreferences() {
+  const settings = collectSettings();
+  settings.voice_mode = $('#voice-mode').value;
+  settings.default_voice = $('#set-default-voice').value.trim();
+  const result = await api('save_settings', settings);
+  if (!result.ok) { toast(result.message); return; }
+  state.settings = result.settings;
+  log(`声音设置已保存：${settings.voice_mode === 'default' ? '使用默认声音' : '克隆我的声音'}`);
+}
+
+$('#btn-load-voices').addEventListener('click', async () => {
+  const button = $('#btn-load-voices');
+  button.disabled = true;
+  const result = await api('list_voices');
+  button.disabled = false;
+  if (!result.ok) { toast(result.message); return; }
+  const voices = result.voices || [];
+  const select = $('#voice-list');
+  select.innerHTML = '<option value="">（选择一个音色）</option>';
+  voices.forEach((voice) => {
+    const option = document.createElement('option');
+    option.value = voice.voice_id;
+    option.textContent = `${voice.name || voice.voice_id} · ${voice.group || ''} · ${voice.voice_id}`;
+    select.appendChild(option);
+  });
+  log(`已获取 ${voices.length} 个音色`);
+});
+
+$('#voice-list').addEventListener('change', async () => {
+  const value = $('#voice-list').value;
+  if (!value) return;
+  $('#set-default-voice').value = value;
+  await saveVoicePreferences();
+});
+
 /* ------------------------------------------------------------------ voice */
 async function loadSamples() {
   const result = await api('voice_samples');
@@ -307,91 +372,25 @@ async function loadSamples() {
   $('#sample-en').textContent = result.en;
 }
 
-let mediaStream = null;
-let mediaRecorder = null;
-let audioCtx = null;
-let analyser = null;
-let chunks = [];
-
-async function toggleRecording(kind) {
-  const button = $(`[data-record="${kind}"]`);
-  if (state.recording === kind) {
-    stopRecording(kind);
-    return;
-  }
-  try {
-    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  } catch (err) {
-    toast('无法访问麦克风：' + (err.message || err));
-    return;
-  }
-  chunks = [];
-  mediaRecorder = new MediaRecorder(mediaStream);
-  mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
-  mediaRecorder.onstop = async () => {
-    const blob = new Blob(chunks, { type: mediaRecorder.mimeType || 'audio/webm' });
-    const buffer = await blob.arrayBuffer();
-    const bytes = new Uint8Array(buffer);
-    let binary = '';
-    const step = 0x8000;
-    for (let i = 0; i < bytes.length; i += step) {
-      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + step));
-    }
-    const b64 = btoa(binary);
-    const result = await api('save_recording', b64, kind);
-    if (!result.ok) { toast(result.message); return; }
-    if (result.warning) toast(result.warning, 'warn');
-    log(`已保存${kind === 'zh' ? '中文' : '英文'}样本`);
-    stopMeter();
-    mediaStream.getTracks().forEach((t) => t.stop());
-  };
-  mediaRecorder.start();
-  state.recording = kind;
-  button.classList.add('recording');
-  button.textContent = '停止录音';
-  startMeter(kind);
+function formatBytes(value) {
+  const size = Number(value) || 0;
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function stopRecording(kind) {
-  const button = $(`[data-record="${kind}"]`);
-  if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
-  state.recording = null;
-  button.classList.remove('recording');
-  button.textContent = kind === 'zh' ? '开始录音' : 'Record';
-}
-
-function startMeter(kind) {
-  const meter = $(`#meter-${kind}`);
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  const source = audioCtx.createMediaStreamSource(mediaStream);
-  analyser = audioCtx.createAnalyser();
-  analyser.fftSize = 256;
-  source.connect(analyser);
-  const data = new Uint8Array(analyser.frequencyBinCount);
-  state.meterTimer = setInterval(() => {
-    if (!analyser) return;
-    analyser.getByteFrequencyData(data);
-    let sum = 0;
-    for (let i = 0; i < data.length; i += 1) sum += data[i];
-    const level = Math.min(100, (sum / data.length) * 0.9);
-    meter.style.width = `${level}%`;
-  }, 70);
-}
-
-function stopMeter() {
-  if (state.meterTimer) { clearInterval(state.meterTimer); state.meterTimer = null; }
-  ['zh', 'en'].forEach((k) => { $(`#meter-${k}`).style.width = '0%'; });
-  if (audioCtx) { try { audioCtx.close(); } catch (e) {} audioCtx = null; }
-  analyser = null;
-}
-
-$$('[data-record]').forEach((btn) => {
-  btn.addEventListener('click', () => toggleRecording(btn.dataset.record));
-});
-
-/* Fallback: import an existing audio file when the microphone is unavailable. */
+/*
+ * Recording is deliberately not offered: the browser MediaRecorder inside
+ * pywebview returned empty buffers on several platforms, so the sample has to
+ * be recorded with an external recorder and imported as a file here.
+ */
 async function importRecording(file, kind) {
   if (!file) return;
+  if (!file.size || file.size < 1024) {
+    toast(`文件太小（${formatBytes(file.size)}），请导入有效的音频文件`);
+    return;
+  }
+  setStatus('导入音频中…');
   const buffer = await file.arrayBuffer();
   const bytes = new Uint8Array(buffer);
   let binary = '';
@@ -400,9 +399,19 @@ async function importRecording(file, kind) {
     binary += String.fromCharCode.apply(null, bytes.subarray(i, i + step));
   }
   const result = await api('save_recording', btoa(binary), kind);
+  setStatus('已导入');
   if (!result.ok) { toast(result.message); return; }
+  const info = result.info || {};
+  const parts = [
+    `已导入${kind === 'zh' ? '中文' : '英文'}样本：${file.name}`,
+    formatBytes(file.size),
+    info.format || '未知格式',
+  ];
+  if (info.duration_ms) parts.push(`${(info.duration_ms / 1000).toFixed(2)}s`);
+  if (info.sample_rate) parts.push(`${info.sample_rate} Hz`);
+  if (typeof info.mean_volume_db === 'number') parts.push(`平均音量 ${info.mean_volume_db} dB`);
+  log(parts.join(' · '));
   if (result.warning) toast(result.warning, 'warn');
-  log(`已导入${kind === 'zh' ? '中文' : '英文'}样本：${file.name}`);
 }
 
 $$('[data-import]').forEach((input) => {
@@ -442,6 +451,8 @@ $('#btn-test-tts').addEventListener('click', async () => {
 /* --------------------------------------------------------------- settings */
 const SETTING_FIELDS = [
   ['tts_provider', '#set-provider', 'str'],
+  ['voice_mode', '#voice-mode', 'str'],
+  ['default_voice', '#set-default-voice', 'str'],
   ['minimax_api_key', '#set-minimax-key', 'str'],
   ['minimax_base_url', '#set-minimax-base', 'str'],
   ['minimax_model', '#set-minimax-model', 'str'],
@@ -504,12 +515,7 @@ function fillSettings(settings) {
   if (region === 'custom') $('#set-minimax-base').value = state.settings.minimax_base_url || '';
   syncProviderBoxes();
   $('#side-mode').textContent = state.settings.dry_run ? '演练' : '真实提交';
-  const voiceId = state.settings.tts_provider === 'openai_compat'
-    ? state.settings.openai_voice
-    : state.settings.tts_provider === 'edge'
-      ? state.settings.edge_voice
-      : state.settings.minimax_voice_id;
-  $('#side-voice').textContent = voiceId ? '已克隆' : '未克隆';
+  syncVoiceMode();
 }
 
 function collectSettings() {
@@ -546,9 +552,9 @@ $('#btn-save-settings').addEventListener('click', async () => {
 $('#btn-check-env').addEventListener('click', async () => {
   const result = await api('check_environment');
   if (!result.ok) { toast(result.message); return; }
-  const info = result;
-  log(`ffmpeg: ${info.ffmpeg || '未找到'}`);
-  log(`语音服务: ${(info.provider && info.provider.message) || '未知'}`);
+  log(`ffmpeg: ${result.ffmpeg || '未找到'}`);
+  if (result.speex) log(`Speex 编码: ${result.speex.message || result.speex.method}`);
+  log(`语音服务: ${(result.provider && result.provider.message) || '未知'}`);
 });
 
 /* ------------------------------------------------------------- device code */
@@ -579,9 +585,15 @@ async function pollEvents() {
   }
 }
 
+const STAGE_LABELS = {
+  start: '开始', download: '下载', question: '题目', tts: '合成',
+  upload: '上传', submit: '回传', clone: '克隆', done: '完成', error: '错误',
+};
+
 function handleEvent(event) {
   if (event.type === 'progress') {
-    if (event.message) log(event.message);
+    const stage = event.stage ? `[${STAGE_LABELS[event.stage] || event.stage}] ` : '';
+    if (event.message) log(`${stage}${event.message}`);
     if (event.percent !== null && event.percent !== undefined) setProgress(event.percent);
   } else if (event.type === 'log') {
     log(event.message, event.level || 'info');

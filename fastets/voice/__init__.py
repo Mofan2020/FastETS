@@ -28,6 +28,8 @@ __all__ = [
     "OpenAICompatProvider",
     "EdgeTTSProvider",
     "build_provider",
+    "resolve_voice_id",
+    "DEFAULT_MINIMAX_VOICE",
     "PROVIDER_NAMES",
 ]
 
@@ -36,6 +38,45 @@ PROVIDER_NAMES = {
     "openai_compat": "OpenAI 兼容接口",
     "edge": "Microsoft Edge TTS（免密钥）",
 }
+
+# A built in MiniMax system voice, used when the user does not want to clone
+# a voice of their own.
+DEFAULT_MINIMAX_VOICE = "male-qn-qingse"
+DEFAULT_EDGE_VOICE = "en-US-AriaNeural"
+DEFAULT_OPENAI_VOICE = "alloy"
+
+
+def resolve_voice_id(settings: dict, provider: VoiceProvider) -> str:
+    """The voice identifier that the active provider should speak with.
+
+    ``voice_mode`` decides whether the cloned voice is used or a plain
+    system voice.  When the user did not clone anything yet the default
+    voice is used as well, so that a run is never blocked by a missing
+    clone.
+    """
+    settings = settings or {}
+    mode = str(settings.get("voice_mode") or "clone").strip().lower()
+    chosen = str(settings.get("default_voice") or "").strip()
+
+    if mode == "default" and chosen:
+        return chosen
+
+    if provider.name == "openai_compat":
+        voice = str(settings.get("openai_voice") or "")
+    elif provider.name == "edge":
+        voice = str(settings.get("edge_voice") or "")
+    else:
+        voice = str(settings.get("minimax_voice_id") or "")
+    if voice:
+        return voice
+
+    if chosen:
+        return chosen
+    if provider.name == "openai_compat":
+        return DEFAULT_OPENAI_VOICE
+    if provider.name == "edge":
+        return DEFAULT_EDGE_VOICE
+    return DEFAULT_MINIMAX_VOICE
 
 
 def build_provider(settings: dict, logger=None) -> VoiceProvider:

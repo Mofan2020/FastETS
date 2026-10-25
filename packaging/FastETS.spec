@@ -16,6 +16,13 @@ sys.path.insert(0, str(ROOT))
 
 datas = [(str(ROOT / "fastets" / "ui" / "web"), "fastets/ui/web")]
 
+# Application icon: macOS wants an .icns, Windows an .ico.
+ICON_DIR = ROOT / "packaging" / "icon"
+ICNS = ICON_DIR / "FastETS.icns"
+ICO = ICON_DIR / "FastETS.ico"
+APP_ICON = str(ICNS) if sys.platform == "darwin" and ICNS.exists() else None
+EXE_ICON = str(ICO) if sys.platform == "win32" and ICO.exists() else None
+
 # Bundle a static ffmpeg so the app never depends on a system installation.
 try:
     import imageio_ffmpeg
@@ -26,6 +33,16 @@ try:
         print(f"[FastETS] bundling ffmpeg: {ffmpeg_exe}")
 except Exception as exc:  # pragma: no cover - build environment dependent
     print(f"[FastETS] ffmpeg not bundled: {exc}")
+
+# Bundle the Speex helper (ffmpeg 6+ has no libspeex encoder any more).
+for helper_name in ("speexenc_raw", "speexenc_raw.exe"):
+    helper = ROOT / "fastets" / "bin" / helper_name
+    if helper.exists():
+        datas.append((str(helper), "fastets/bin"))
+        print(f"[FastETS] bundling speex helper: {helper}")
+        break
+else:
+    print("[FastETS] speex helper missing - run packaging/native/build_speex.sh")
 
 hiddenimports = [
     "webview",
@@ -78,7 +95,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,
+    icon=EXE_ICON,
 )
 
 coll = COLLECT(
@@ -96,9 +113,9 @@ if sys.platform == "darwin":
     app = BUNDLE(
         coll,
         name="FastETS.app",
-        icon=None,
+        icon=APP_ICON,
         bundle_identifier="cc.fastets.app",
-        version="1.0.0",
+        version="1.0.1",
         info_plist={
             "CFBundleName": "FastETS",
             "CFBundleDisplayName": "FastETS",
@@ -106,7 +123,7 @@ if sys.platform == "darwin":
             "NSCameraUsageDescription": "FastETS 不使用摄像头。",
             "LSMinimumSystemVersion": "10.15",
             "NSHighResolutionCapable": True,
-            "CFBundleShortVersionString": "1.0.0",
-            "CFBundleVersion": "1.0.0",
+            "CFBundleShortVersionString": "1.0.1",
+            "CFBundleVersion": "1.0.1",
         },
     )

@@ -39,6 +39,22 @@ jobs:
       - name: Import check
         run: python -c "import fastets, fastets.ui.app, fastets.core.completer, fastets.voice; print('imports ok')"
 
+      - name: Build the Speex helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            for candidate in "C:/ProgramData/mingw64/mingw64/bin/gcc.exe" "C:/msys64/mingw64/bin/gcc.exe"; do
+              if [ -f "$candidate" ]; then export CC="$candidate"; break; fi
+            done
+            if [ -z "${CC:-}" ]; then
+              choco install mingw -y --no-progress
+              export PATH="$PATH:C:/ProgramData/mingw64/mingw64/bin"
+              export CC=gcc
+            fi
+          fi
+          ./packaging/native/build_speex.sh
+
       - name: Self test
         run: python tests/selftest.py
 

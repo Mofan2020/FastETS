@@ -20,7 +20,7 @@ from ..core import completer as completer_mod
 from ..core.ets_api import EtsApiError
 from ..core.session import Session
 from ..jobs.runner import JobRunner
-from ..voice import ProviderError, build_provider
+from ..voice import ProviderError, build_provider, resolve_voice_id
 
 # Texts the user has to read for the voice clone. The English prompt is what
 # MiniMax uses as `clone_prompt.prompt_audio` so the cloned voice keeps a
@@ -354,40 +354,70 @@ class FastETSApi:
         )
 
     def save_recording(self, data_b64: str, kind: str) -> Dict[str, Any]:
-        """Persist a browser recording as a WAV file in the voice directory."""
+        """Persist an imported audio file as the voice clone sample.
+
+        The sample is converted to a 16 kHz mono mp3 (what every voice service
+        accepts) and the result is probed so that the UI can show what was
+        actually imported - duration, format and loudness.
+        """
         if kind not in ("zh", "en"):
-            return self._fail("未知的录音类型")
+            return self._fail("未知的样本类型")
         if not data_b64:
-            return self._fail("录音数据为空")
+            return self._fail("没有收到音频数据，请重新导入文件")
         try:
             payload = base64.b64decode(data_b64, validate=False)
         except (binascii.Error, ValueError) as exc:
-            return self._fail(f"录音数据解析失败: {exc}")
+            return self._fail(f"音频数据解析失败: {exc}")
         if len(payload) < 1024:
-            return self._fail("录音太短，请重新录制")
-        target = config.voice_dir() / f"sample_{kind}.webm"
-        target.write_bytes(payload)
-        # Convert to a format every voice service accepts.
-        try:
-            from ..core.audio import AudioTools
+            return self._fail(
+                f"音频文件太小（{len(payload)} 字节），请导入一段完整的录音"
+            )
 
-            tools = AudioTools(logger=self._log)
-            wav = tools.to_mp3(target, config.voice_dir() / f"sample_{kind}.mp3")
+        from ..core.audio import AudioTools
+
+        tools = AudioTools(logger=self._log)
+        raw = config.voice_dir() / f"sample_{kind}.input"
+        raw.write_bytes(payload)
+        info = tools.probe(raw)
+        if not info.get("duration_ms"):
+            return self._fail(
+                "无法识别这个音频文件（ffmpeg 解码失败）。"
+                "请导入 mp3 / wav / m4a / flac 等常见格式。"
+            )
+        if info["duration_ms"] < 300:
+            return self._fail(
+                f"音频太短（{info['duration_ms'] / 1000:.2f} 秒），"
+                "请录制至少 1 秒以上的完整朗读"
+            )
+
+        mp3 = config.voice_dir() / f"sample_{kind}.mp3"
+        try:
+            tools.to_mp3(raw, mp3)
         except Exception as exc:  # noqa: BLE001
-            return self._ok(path=str(target), warning=f"转码失败: {exc}")
-        return self._ok(path=str(wav))
+            return self._fail(f"音频转码失败: {exc}")
+
+        volume = tools.mean_volume_db(mp3)
+        info["mean_volume_db"] = volume
+        info["path"] = str(mp3)
+        warning = ""
+        if volume is not None and volume <= -45.0:
+            warning = (
+                f"这段录音几乎没有声音（平均音量 {volume:.1f} dB），"
+                "克隆出来的音色会是空的，请重新录制"
+            )
+        return self._ok(path=str(mp3), info=info, warning=warning)
 
     def clone_voice(self) -> Dict[str, Any]:
         zh = config.voice_dir() / "sample_zh.mp3"
         en = config.voice_dir() / "sample_en.mp3"
-        if not zh.exists():
-            return self._fail("请先录制中文样本")
+        if not zh.exists() or zh.stat().st_size == 0:
+            return self._fail("请先导入中文样本音频文件")
         completer = self._completer(progress=self.runner.progress)
 
         def run() -> Dict[str, Any]:
             return completer.clone_voice(
                 zh,
-                en if en.exists() else None,
+                en if en.exists() and en.stat().st_size else None,
                 CLONE_SAMPLE_EN,
                 "FastETSVoice",
             )
@@ -404,13 +434,7 @@ class FastETSApi:
         content = text or "Hello, this is a test of the FastETS speech engine."
         try:
             provider = build_provider(settings, logger=self._log)
-            voice_id = (
-                str(settings.get("openai_voice") or "")
-                if provider.name == "openai_compat"
-                else str(settings.get("edge_voice") or "")
-                if provider.name == "edge"
-                else str(settings.get("minimax_voice_id") or "")
-            )
+            voice_id = resolve_voice_id(settings, provider)
             result = provider.synthesize(
                 content,
                 voice_id=voice_id,
@@ -422,6 +446,7 @@ class FastETSApi:
         return self._ok(
             audio=base64.b64encode(result.audio).decode("ascii"),
             mime="audio/mpeg",
+            voice_id=voice_id,
         )
 
     def list_voices(self) -> Dict[str, Any]:
@@ -433,15 +458,19 @@ class FastETSApi:
             return self._fail(exc)
 
     def check_environment(self) -> Dict[str, Any]:
-        """Verify ffmpeg and the configured voice provider."""
+        """Verify ffmpeg, the Speex encoder and the configured voice provider."""
         from ..core.audio import AudioTools, resolve_ffmpeg
 
-        result: Dict[str, Any] = {"ok": True, "ffmpeg": "", "provider": {}}
+        result: Dict[str, Any] = {"ok": True, "ffmpeg": "", "provider": {}, "speex": {}}
         try:
             result["ffmpeg"] = resolve_ffmpeg(str(config.load_settings().get("ffmpeg_path") or ""))
         except Exception as exc:  # noqa: BLE001
             result["ok"] = False
             result["ffmpeg"] = str(exc)
+        try:
+            result["speex"] = AudioTools(logger=self._log).speex_status()
+        except Exception as exc:  # noqa: BLE001
+            result["speex"] = {"available": False, "method": "none", "message": str(exc)}
         try:
             provider = build_provider(config.load_settings(), logger=self._log)
             result["provider"] = provider.health_check()

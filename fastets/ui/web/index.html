@@ -147,37 +147,61 @@
       <!-- ---------- 声音 ---------- -->
       <section class="page" data-page="voice">
         <div class="card">
-          <h2 class="card-title">预配置：声音克隆</h2>
-          <p class="card-hint">按顺序朗读下面的中文与英文文本并录音。系统用这两段样本克隆出你的音色，之后所有作业都用这个声音朗读。</p>
+          <h2 class="card-title">声音</h2>
+          <p class="card-hint">可以选择<strong>克隆自己的声音</strong>，也可以<strong>直接使用服务商的默认音色</strong>（无需克隆，导入样本这一步可以完全跳过）。</p>
 
-          <div class="sample">
-            <div class="sample-head">
-              <b>中文样本</b>
-              <div class="row-actions">
-                <button class="btn btn-secondary" data-record="zh">开始录音</button>
-                <button class="btn btn-ghost" data-play="zh">试听</button>
-                <label class="btn btn-ghost file-btn">导入文件<input type="file" data-import="zh" accept="audio/*" hidden /></label>
+          <label class="field">
+            <span>使用方式</span>
+            <select id="voice-mode" class="select">
+              <option value="clone">克隆我的声音</option>
+              <option value="default">直接使用默认声音</option>
+            </select>
+          </label>
+
+          <div id="voice-clone-box">
+            <p class="card-hint">按顺序朗读下面的中文与英文文本并<strong>录音后上传音频文件</strong>。程序不提供麦克风录制，必须自行录好并导入文件。系统用这两段样本克隆出你的音色，之后所有作业都用这个声音朗读。</p>
+
+            <div class="sample">
+              <div class="sample-head">
+                <b>中文样本</b>
+                <div class="row-actions">
+                  <button class="btn btn-ghost" data-play="zh">试听</button>
+                  <label class="btn btn-secondary file-btn">导入音频文件<input type="file" data-import="zh" accept="audio/*" hidden /></label>
+                </div>
               </div>
+              <p id="sample-zh" class="sample-text"></p>
+              <div class="meter"><div id="meter-zh" class="meter-fill"></div></div>
             </div>
-            <p id="sample-zh" class="sample-text"></p>
-            <div class="meter"><div id="meter-zh" class="meter-fill"></div></div>
+
+            <div class="sample">
+              <div class="sample-head">
+                <b>English sample</b>
+                <div class="row-actions">
+                  <button class="btn btn-ghost" data-play="en">Preview</button>
+                  <label class="btn btn-secondary file-btn">Import audio file<input type="file" data-import="en" accept="audio/*" hidden /></label>
+                </div>
+              </div>
+              <p id="sample-en" class="sample-text"></p>
+              <div class="meter"><div id="meter-en" class="meter-fill"></div></div>
+            </div>
+
+            <div class="row-actions">
+              <button id="btn-clone" class="btn btn-primary">克隆声音</button>
+            </div>
           </div>
 
-          <div class="sample">
-            <div class="sample-head">
-              <b>English sample</b>
-              <div class="row-actions">
-                <button class="btn btn-secondary" data-record="en">Record</button>
-                <button class="btn btn-ghost" data-play="en">Preview</button>
-                <label class="btn btn-ghost file-btn">Import file<input type="file" data-import="en" accept="audio/*" hidden /></label>
-              </div>
+          <div id="voice-default-box" class="hidden">
+            <label class="field">
+              <span>默认音色 ID</span>
+              <input id="set-default-voice" type="text" placeholder="male-qn-qingse" />
+            </label>
+            <div class="row-actions">
+              <button id="btn-load-voices" class="btn btn-secondary">获取音色列表</button>
+              <select id="voice-list" class="select"><option value="">（尚未加载音色列表）</option></select>
             </div>
-            <p id="sample-en" class="sample-text"></p>
-            <div class="meter"><div id="meter-en" class="meter-fill"></div></div>
           </div>
 
           <div class="row-actions">
-            <button id="btn-clone" class="btn btn-primary">克隆声音</button>
             <button id="btn-test-tts" class="btn btn-secondary">测试合成</button>
             <span id="voice-status" class="hint"></span>
           </div>

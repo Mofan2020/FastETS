@@ -14,16 +14,28 @@ back to a system installation or a user configured path.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from .. import config
 
 
 class AudioError(RuntimeError):
     pass
+
+
+class SpeexUnavailableError(AudioError):
+    """Raised when no Speex encoder can be found on this machine."""
+
+
+_DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d\d):(\d\d(?:\.\d+)?)")
+_STREAM_RE = re.compile(r"Stream #\d+:\d+.*?Audio:\s*([A-Za-z0-9_]+)")
+_SAMPLE_RATE_RE = re.compile(r"(\d+)\s*Hz")
+_CHANNELS_RE = re.compile(r"(mono|stereo|quad|\d+\.\d+ channels)")
+_MEAN_VOLUME_RE = re.compile(r"mean_volume:\s*(-?\d+(?:\.\d+)?) dB")
 
 
 def _bundled_ffmpeg() -> Optional[str]:
@@ -172,37 +184,73 @@ class AudioTools:
         return target
 
     def to_speex(self, source: Path, target: Optional[Path] = None) -> Path:
-        """Convert any audio file to a raw Speex payload."""
+        """Convert any audio file to a raw Speex payload.
+
+        ffmpeg only ships the ``libspeex`` encoder up to version 5.x, so the
+        conversion falls back to the helper that FastETS bundles (a tiny
+        command line front end for libspeex).
+        """
         source = Path(source)
         if not source.exists():
             raise AudioError(f"音频文件不存在: {source}")
         target = Path(target or config.audio_cache_dir() / f"{crypto_id()}.speex")
-        ogg_path = target.with_suffix(".ogg.tmp.spx")
-        _run(
-            self.ffmpeg,
-            [
-                "-y",
-                "-i",
-                str(source),
-                "-vn",
-                "-ac",
-                "1",
-                "-ar",
-                "16000",
-                "-codec:a",
-                "libspeex",
-                "-f",
-                "spx",
-                str(ogg_path),
-            ],
-        )
-        try:
-            raw = extract_raw_speex_from_ogg(ogg_path.read_bytes())
-        finally:
-            if ogg_path.exists():
-                ogg_path.unlink()
-        target.write_bytes(raw)
-        return target
+
+        if self.has_encoder("libspeex"):
+            ogg_path = target.with_suffix(".ogg.tmp.spx")
+            _run(
+                self.ffmpeg,
+                [
+                    "-y",
+                    "-i",
+                    str(source),
+                    "-vn",
+                    "-ac",
+                    "1",
+                    "-ar",
+                    "16000",
+                    "-codec:a",
+                    "libspeex",
+                    "-f",
+                    "spx",
+                    str(ogg_path),
+                ],
+            )
+            try:
+                raw = extract_raw_speex_from_ogg(ogg_path.read_bytes())
+            finally:
+                if ogg_path.exists():
+                    ogg_path.unlink()
+            target.write_bytes(raw)
+            return target
+
+        from . import speex as speex_mod
+
+        return speex_mod.encode_with_helper(self.ffmpeg, source, target)
+
+    def speex_status(self) -> Dict[str, Any]:
+        """Describe which Speex encoder this machine can use."""
+        from . import speex as speex_mod
+
+        if self.has_encoder("libspeex"):
+            return {
+                "available": True,
+                "method": "ffmpeg",
+                "message": "ffmpeg 自带 libspeex 编码器",
+            }
+        if speex_mod.helper_available():
+            return {
+                "available": True,
+                "method": "helper",
+                "message": f"使用内置 Speex 编码器 {speex_mod.find_helper()}",
+            }
+        return {
+            "available": False,
+            "method": "none",
+            "message": (
+                "本机没有可用的 Speex 编码器，提交时会省略 spx 附件"
+                "（mp3 与评测 XML 仍会正常上传，分数不受影响）"
+            ),
+        }
 
     def duration_ms(self, source: Path) -> int:
         """Duration of an audio file in milliseconds."""
@@ -226,6 +274,113 @@ class AudioTools:
             return int(float(value) * 1000) if value else 0
         except Exception:
             return 0
+
+    # -- diagnostics ---------------------------------------------------------
+
+    def probe(self, source: Path) -> Dict[str, Any]:
+        """Describe an audio file: container, codec, rate, channels, length.
+
+        Uses ``ffmpeg -i`` instead of ``ffprobe`` because the bundled binary is
+        a plain ``ffmpeg`` without a sibling ``ffprobe``.
+        """
+        source = Path(source)
+        info: Dict[str, Any] = {
+            "path": str(source),
+            "exists": source.exists(),
+            "size": source.stat().st_size if source.exists() else 0,
+            "duration_ms": 0,
+            "codec": "",
+            "sample_rate": 0,
+            "channels": "",
+            "format": "",
+        }
+        if not source.exists():
+            return info
+        try:
+            result = subprocess.run(
+                [self.ffmpeg, "-hide_banner", "-i", str(source)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=60,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return info
+        text = result.stderr.decode("utf-8", "replace")
+        match = _DURATION_RE.search(text)
+        if match:
+            hours, minutes, seconds = match.groups()
+            info["duration_ms"] = int(
+                (int(hours) * 3600 + int(minutes) * 60 + float(seconds)) * 1000
+            )
+        codec = _STREAM_RE.search(text)
+        if codec:
+            info["codec"] = codec.group(1)
+        rate = _SAMPLE_RATE_RE.search(text)
+        if rate:
+            info["sample_rate"] = int(rate.group(1))
+        channels = _CHANNELS_RE.search(text)
+        if channels:
+            info["channels"] = channels.group(1)
+        fmt = re.search(r"Input #0,\s*([^,\n]+),", text)
+        if fmt:
+            info["format"] = fmt.group(1).strip()
+        return info
+
+    def mean_volume_db(self, source: Path) -> Optional[float]:
+        """Average loudness of a file in dB (``None`` when it cannot be measured)."""
+        source = Path(source)
+        if not source.exists():
+            return None
+        try:
+            result = subprocess.run(
+                [
+                    self.ffmpeg,
+                    "-hide_banner",
+                    "-nostats",
+                    "-i",
+                    str(source),
+                    "-af",
+                    "volumedetect",
+                    "-f",
+                    "null",
+                    "-",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=120,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        text = result.stderr.decode("utf-8", "replace")
+        match = _MEAN_VOLUME_RE.search(text)
+        if match:
+            try:
+                return float(match.group(1))
+            except ValueError:
+                return None
+        return None
+
+    def is_silent(self, source: Path, threshold_db: float = -45.0) -> bool:
+        """True when the file carries no usable signal (pure silence)."""
+        volume = self.mean_volume_db(source)
+        if volume is None:
+            return False
+        return volume <= threshold_db
+
+    def has_encoder(self, name: str) -> bool:
+        """Whether the resolved ffmpeg exposes the given encoder."""
+        try:
+            result = subprocess.run(
+                [self.ffmpeg, "-hide_banner", "-encoders"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=60,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        text = result.stdout.decode("utf-8", "replace")
+        pattern = re.compile(rf"^\s*\S+\s+{re.escape(name)}\b", re.MULTILINE)
+        return bool(pattern.search(text))
 
     def validate(self) -> None:
         _run(self.ffmpeg, ["-version"], timeout=30)

@@ -18,9 +18,10 @@ from typing import Any, Callable, Dict, List, Optional
 import requests
 
 from .. import config
-from ..voice import ProviderError, VoiceProvider, build_provider
+from ..voice import ProviderError, VoiceProvider, build_provider, resolve_voice_id
 from . import audio as audio_mod
 from . import crypto, oss, paper as paper_mod, score as score_mod, zipcrypto
+from .audio import SpeexUnavailableError
 from .ets_api import CODE_TOKEN_EXPIRED, EtsApiClient, EtsApiError
 from .pacing import Pacer, pacer_from_settings
 from .session import Session
@@ -96,6 +97,17 @@ class Completer:
     def _info(self, message: str, *args: Any) -> None:
         if self._log:
             self._log.info(message, *args)
+
+    def _warn_speex_once(self, reason: str) -> None:
+        """Tell the user once that the optional spx attachment is missing."""
+        if getattr(self, "_speex_warned", False):
+            return
+        self._speex_warned = True
+        self._info("Speex 编码不可用: %s", reason)
+        self._emit(
+            "error",
+            f"提示：{reason}（mp3 与评测 XML 仍会照常上传，分数不受影响）",
+        )
 
     def _check_cancel(self) -> None:
         if self.pacer.stopped:
@@ -316,11 +328,7 @@ class Completer:
 
     def _voice_for(self, provider: VoiceProvider) -> str:
         """The voice identifier that belongs to the active provider."""
-        if provider.name == "openai_compat":
-            return str(self.settings.get("openai_voice") or "")
-        if provider.name == "edge":
-            return str(self.settings.get("edge_voice") or "")
-        return str(self.settings.get("minimax_voice_id") or "")
+        return resolve_voice_id(self.settings, provider)
 
     def _score_for(
         self, question: paper_mod.Question, segment_max: float, text: str, duration_ms: int
@@ -492,7 +500,6 @@ class Completer:
         raw_path.write_bytes(result.audio)
 
         mp3_path = self._audio.to_mp3(raw_path)
-        speex_path = self._audio.to_speex(raw_path)
         duration_ms = result.duration_ms or self._audio.duration_ms(mp3_path)
 
         category = score_mod.category_for(question.structure_type, question.group_name)
@@ -504,7 +511,7 @@ class Completer:
 
         if dry_run:
             if not self.settings.get("keep_audio_cache", True):
-                _cleanup(raw_path, mp3_path, speex_path, xml_path)
+                _cleanup(raw_path, mp3_path, xml_path)
             return {
                 "index": segment_index,
                 "status": "dry-run",
@@ -513,11 +520,24 @@ class Completer:
                 "text": text[:80],
             }
 
-        # Upload the three attachments with small pauses in between.
+        # The "spx" attachment is the raw Speex payload of the recording.  It is
+        # optional for the server (the official client sends an empty value for
+        # every answer type that has no recording), so a missing encoder must
+        # never block the submission.
+        speex_path: Optional[Path] = None
+        try:
+            speex_path = self._audio.to_speex(raw_path)
+        except SpeexUnavailableError as exc:
+            self._warn_speex_once(str(exc))
+
+        # Upload the attachments with small pauses in between.
         self.pacer.upload()
         mp3 = uploader.upload(mp3_path, "audio")
-        self.pacer.upload()
-        speex = uploader.upload(speex_path, "speex")
+        speex_url = ""
+        if speex_path is not None:
+            self.pacer.upload()
+            speex = uploader.upload(speex_path, "speex")
+            speex_url = speex["url"]
         self.pacer.upload()
         xml_result = uploader.upload(xml_path, "xml")
 
@@ -538,12 +558,12 @@ class Completer:
             score=score_value,
             score_detail=score_data.to_json(),
             mp3_url=mp3["url"],
-            speex_url=speex["url"],
+            speex_url=speex_url,
             xml_url=xml_result["url"],
         )
 
         if not self.settings.get("keep_audio_cache", True):
-            _cleanup(raw_path, mp3_path, speex_path, xml_path)
+            _cleanup(raw_path, mp3_path, xml_path, speex_path)
         else:
             _cleanup(raw_path)
 
@@ -554,6 +574,7 @@ class Completer:
             "duration_ms": duration_ms,
             "text": text[:80],
             "mp3_url": mp3["url"],
+            "speex_uploaded": bool(speex_url),
         }
 
     def _complete_choice(

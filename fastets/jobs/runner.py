@@ -2,11 +2,47 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 import traceback
 import uuid
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
+
+
+def _as_text(value: Any) -> str:
+    """Render any value as a single readable line of text."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    if isinstance(value, Mapping):
+        try:
+            return json.dumps(value, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            return str(value)
+    if isinstance(value, (list, tuple)):
+        return "、".join(_as_text(item) for item in value)
+    return str(value)
+
+
+def _normalise_progress(
+    message: Any, percent: Optional[float], extra: Dict[str, Any]
+) -> Tuple[str, Optional[float], Dict[str, Any]]:
+    """Split a progress payload into ``(text, percent, extra)``."""
+    if not isinstance(message, Mapping):
+        return _as_text(message), percent, dict(extra)
+
+    payload: Dict[str, Any] = dict(message)
+    text = _as_text(payload.pop("message", ""))
+    inner_percent = payload.pop("percent", None)
+    if percent is None:
+        percent = inner_percent if isinstance(inner_percent, (int, float)) else None
+    merged = dict(payload)
+    merged.update(extra)
+    return text, percent, merged
 
 
 class Job:
@@ -125,19 +161,30 @@ class JobRunner:
             return True
         return False
 
-    def progress(self, message: str, percent: Optional[float] = None, **extra: Any) -> None:
-        """Emit a progress event for the running job."""
+    def progress(
+        self,
+        message: Any,
+        percent: Optional[float] = None,
+        **extra: Any,
+    ) -> None:
+        """Emit a progress event for the running job.
+
+        ``message`` may be a plain string or a mapping. The completion pipeline
+        reports structured payloads (``{"stage": ..., "message": ..., ...}``);
+        normalising them here keeps the UI from ever rendering a raw object.
+        """
+        text, percent, extra = _normalise_progress(message, percent, extra)
         with self._lock:
             job = self._current
         if job:
-            job.message = message
+            job.message = text
             if percent is not None:
                 job.percent = percent
-        event = {"type": "progress", "message": message, "percent": percent}
+        event = {"type": "progress", "message": text, "percent": percent}
         event.update(extra)
         self._push(event)
 
-    def log(self, message: str, level: str = "info", **extra: Any) -> None:
-        event = {"type": "log", "message": message, "level": level}
+    def log(self, message: Any, level: str = "info", **extra: Any) -> None:
+        event = {"type": "log", "message": _as_text(message), "level": level}
         event.update(extra)
         self._push(event)

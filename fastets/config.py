@@ -137,6 +137,8 @@ def disclaimer_path() -> Path:
 DEFAULT_SETTINGS: Dict[str, Any] = {
     # voice / TTS
     "tts_provider": "minimax",       # minimax | edge | openai_compat
+    "voice_mode": "clone",           # clone | default
+    "default_voice": "",             # voice id used when voice_mode == default
     "minimax_api_key": "",
     "minimax_model": "speech-2.6-hd",
     "minimax_base_url": "https://api.minimaxi.com",

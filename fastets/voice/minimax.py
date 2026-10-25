@@ -73,8 +73,13 @@ class MiniMaxProvider(VoiceProvider):
             raise ProviderError(f"MiniMax {path} 返回了非 JSON 内容") from exc
         status = (body.get("base_resp") or {}).get("status_code")
         if status not in (None, 0, "0"):
+            message = str(
+                (body.get("base_resp") or {}).get("status_msg") or "MiniMax 调用失败"
+            )
+            trace = body.get("trace_id", "")
             raise ProviderError(
-                str((body.get("base_resp") or {}).get("status_msg") or "MiniMax 调用失败")
+                f"MiniMax {path} 失败：{message}"
+                + (f"（trace_id={trace}）" if trace else "")
             )
         return body
 
@@ -118,6 +123,10 @@ class MiniMaxProvider(VoiceProvider):
         sample_path = Path(sample_path)
         if not sample_path.exists():
             raise ProviderError(f"样本文件不存在: {sample_path}")
+        if sample_path.stat().st_size < 1024:
+            raise ProviderError(
+                f"样本文件太小（{sample_path.stat().st_size} 字节），请重新录制"
+            )
 
         self._info("MiniMax: uploading clone source %s", sample_path.name)
         file_id = self._upload_file(sample_path, "voice_clone")
@@ -193,7 +202,10 @@ class MiniMaxProvider(VoiceProvider):
         data = body.get("data") or {}
         audio = data.get("audio")
         if not audio:
-            raise ProviderError("MiniMax 未返回音频数据")
+            raise ProviderError(
+                "MiniMax 未返回音频数据"
+                + self._diagnostics(body, data)
+            )
 
         if isinstance(audio, str) and audio.startswith(("http://", "https://")):
             audio_bytes = self._download(audio)
@@ -224,6 +236,28 @@ class MiniMaxProvider(VoiceProvider):
         if response.status_code >= 400:
             raise ProviderError(f"下载 MiniMax 音频 HTTP {response.status_code}")
         return response.content
+
+    @staticmethod
+    def _diagnostics(body: Dict[str, Any], data: Dict[str, Any]) -> str:
+        """Extra context for an empty MiniMax answer."""
+        parts: List[str] = []
+        trace = body.get("trace_id")
+        if trace:
+            parts.append(f"trace_id={trace}")
+        status = data.get("status")
+        if status is not None:
+            parts.append(f"status={status}")
+        extra = data.get("extra_info")
+        if isinstance(extra, dict) and extra:
+            parts.append(
+                "extra_info=" + json.dumps(extra, ensure_ascii=False)[:200]
+            )
+        resp = body.get("base_resp") or {}
+        if resp.get("status_msg"):
+            parts.append(f"status_msg={resp['status_msg']}")
+        if not parts:
+            return f"（响应内容：{json.dumps(body, ensure_ascii=False)[:200]}）"
+        return "（" + "，".join(parts) + "）"
 
     # -- voices --------------------------------------------------------------
 

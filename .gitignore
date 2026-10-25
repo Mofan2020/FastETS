@@ -21,3 +21,7 @@ Thumbs.db
 *.log
 .env
 .env.*
+packaging/icon/FastETS.iconset/
+
+# locally built native helper (CI builds its own)
+fastets/bin/
