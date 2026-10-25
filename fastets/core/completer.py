@@ -21,7 +21,6 @@ from .. import config
 from ..voice import ProviderError, VoiceProvider, build_provider, resolve_voice_id
 from . import audio as audio_mod
 from . import crypto, oss, paper as paper_mod, score as score_mod, zipcrypto
-from .audio import SpeexUnavailableError
 from .ets_api import CODE_TOKEN_EXPIRED, EtsApiClient, EtsApiError
 from .pacing import Pacer, pacer_from_settings
 from .session import Session
@@ -103,10 +102,10 @@ class Completer:
         if getattr(self, "_speex_warned", False):
             return
         self._speex_warned = True
-        self._info("Speex 编码不可用: %s", reason)
+        self._info("Speex 附件未附带: %s", reason)
         self._emit(
             "error",
-            f"提示：{reason}（mp3 与评测 XML 仍会照常上传，分数不受影响）",
+            f"提示：{reason}（本次未附带 spx 附件，mp3 与评测 XML 仍会照常上传，分数不受影响）",
         )
 
     def _check_cancel(self) -> None:
@@ -527,7 +526,9 @@ class Completer:
         speex_path: Optional[Path] = None
         try:
             speex_path = self._audio.to_speex(raw_path)
-        except SpeexUnavailableError as exc:
+        except audio_mod.AudioError as exc:
+            # SpeexUnavailableError (no encoder at all) as well as a failing
+            # encode: the answer is submitted without the spx attachment.
             self._warn_speex_once(str(exc))
 
         # Upload the attachments with small pauses in between.
