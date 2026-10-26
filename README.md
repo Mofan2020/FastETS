@@ -1,5 +1,6 @@
 # FastETS
 
+> 该项目将在2027/10/31左右停止维护
 > **易听说（讯飞 E听说 / ets100）作业自动化助手 · 桌面版**
 > Python + pywebview · 支持 macOS 与 Windows
 
