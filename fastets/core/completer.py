@@ -708,7 +708,12 @@ class Completer:
         category = score_mod.category_for(question.structure_type, question.group_name)
         target_score = self._score_for(question, segment_max, text, duration_ms)
         score_value = score_mod.clamp_score(target_score, segment_max)
-        xml_text = score_mod.build_score_xml(text, category, target_score)
+        xml_text = score_mod.build_score_xml(
+            text,
+            category,
+            target_score,
+            sentences=list(question.sentences or []),
+        )
         xml_path = config.audio_cache_dir() / f"{crypto.random_hex(16)}.xml"
         xml_path.write_text(xml_text, encoding="utf-8")
 

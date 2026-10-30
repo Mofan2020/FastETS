@@ -65,6 +65,13 @@ def sentences_of(text: str) -> List[str]:
 def category_for(structure_type: str, group_name: str) -> str:
     if structure_type == "collector.picture" or "转述" in group_name:
         return "topic"
+    if (
+        structure_type in ("collector.repeat_essay", "collector.repeat_dialogue")
+        or "短文跟读" in group_name
+        or "短文复述" in group_name
+    ):
+        # A whole passage: the XML has to carry every sentence of it.
+        return "read_chapter"
     if structure_type == "collector.read" or "朗读" in group_name:
         return "read_chapter"
     return "simple_expression"
@@ -90,8 +97,15 @@ def build_score_xml(
     category: str,
     score: float,
     internal_score: Optional[float] = None,
+    sentences: Optional[List[str]] = None,
 ) -> str:
-    """Build the evaluation detail XML for one submission."""
+    """Build the evaluation detail XML for one submission.
+
+    ``sentences`` is the sentence list the server knows about.  When it is
+    given, the XML uses exactly that split instead of guessing it from the
+    text - 短文跟读 ships the authoritative list (with the timing of every
+    sentence) and the marking service maps its result back by index.
+    """
     content = (text or "").strip() or "full score"
     internal = float(score if internal_score is None else internal_score)
 
@@ -119,7 +133,10 @@ def build_score_xml(
 
     if category == "read_chapter":
         sentence_nodes: List[str] = []
-        for sentence_index, sentence in enumerate(sentences_of(content)):
+        known_sentences = [s for s in (sentences or []) if s]
+        for sentence_index, sentence in enumerate(
+            known_sentences or sentences_of(content)
+        ):
             word_nodes: List[str] = []
             for word_index, word in enumerate(words_of(sentence)):
                 begin = max(content.find(word), 0)

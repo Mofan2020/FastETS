@@ -140,16 +140,43 @@ password       = MD5(seed).upper() + MD5(上述大写 hex 的 ASCII).upper()
 | `collector.fill` | 听后记录 | `info.std[].value`，题号 `info.std[].xth` |
 | `collector.dialogue` | 回答问题 | `info.question[].std[].value` |
 | `collector.read` | 模仿朗读 / 短文朗读 | 无标准答案，正文在 `info.value` |
+| `collector.word` | 单词朗读（Vocabulary） | 无标准答案，要读的词在 `info.value` |
+| `collector.repeat_essay` | 短文跟读 / 短文复述 | 正文在 `info.value`，分句在 `info.sublist[]` |
 
 文本清洗：`ets_th{数字}` 前缀、HTML 标签、零宽字符 `\u200B`、`</p><p>` → 换行。
 
+### collector.word —— 一个包一个词
+
+资源包里只有**一个单词**，还有 `info.translate`（释义）、`info.xh`（包内题号，实测恒为 1）、
+`info.audio`。所以它就是**一个 item（order=1）、一条录音**，读的是 `info.value` 里的那个词。
+实测一份作业的 Vocabulary 大题有 43 个这样的包（871333…871375），每包一词。
+
+### collector.repeat_essay —— 一篇短文一条录音
+
+`info.value` 是**整篇短文**，`info.sublist` 是它的分句表，每句带 `seq`、`text`、
+`translate`，以及该句在原音频里的 `begintime` / `endtime`（实测一篇 10 句、约 50 秒，
+时间轴从 0 连续到 49.9）。
+
+**这个包是一个 item（order=1）、一条连续录音**，不是「一句一个 item」：
+
+- 服务端是按「资源包 + 包内题号」记账的，而我们早期把分句表拆成了 10 个 item
+  （order 1…10），服务端只认下 order=1 那一条（第一句），于是这道大题只得了
+  **12 / 100 分**，官方 App 里显示一个不完整的朗读记录；
+- `begintime` / `endtime` 是**原音频的时间轴**，服务端要靠它把学生的一整段录音
+  对齐到每一句——所以录音必须是一整段，不能一句一条。
+
+评测 XML 用 `read_chapter` 类别，并且**逐句列表直接取资源包里的 `sublist`**（不自己
+按标点切句），这样评测服务能按序号把结果对回每一句。大题满分按官方 App 的 100 分算。
+
 ### 未知 structure_type 的通用拆分
 
-上面 7 种是公开实现（`laststudio/Fuck_ets100` 的 API 文档、`banglee13/Fuck_ets100_win`、
-`HULU53/EPlus_Windows`）与本地真实资源包都能对上的类型。**除此之外的类型名目前没有
-任何可核实的出处**——本地缓存里只出现过 `collector.read` / `collector.picture` /
-`collector.dialogue` 三种，公开仓库与检索里也搜不到 `collector.repeat_essay` 之类
-的名字。所以 FastETS 不去猜题型名，而是按**数据结构**兜底：
+上面 9 种里，7 种是公开实现（`laststudio/Fuck_ets100` 的 API 文档、
+`banglee13/Fuck_ets100_win`、`HULU53/EPlus_Windows`）能对上的类型；另外两种
+（`collector.word` / `collector.repeat_essay`）是 2026-10-30 从用户作业的真实资源包里
+拿到样本后补上的（公开仓库里搜不到这两个名字）。
+
+**再往下的类型名仍然没有可核实的出处**，所以 FastETS 不去猜题型名，而是按**数据结构**
+兜底：
 
 只要 `info` 里带一份条目列表（`question` / `sublist` / `exam_info` / `items` /
 `list` / `word` / `words`），就拆成「一个条目一道题」；条目里的答案列表
@@ -163,7 +190,9 @@ password       = MD5(seed).upper() + MD5(上述大写 hex 的 ASCII).upper()
 
 遇到没见过的题型时，程序会在日志里打一行
 `未识别的题型结构 <type>（<大题名>），已按通用规则拆成 N 道题`，
-把类型名和包名记下来——拿到真实样本后就能据此写精确解析。
+把类型名和包名记下来——拿到真实样本后就能据此写精确解析。**这条日志是 v1.0.5
+上线后最有价值的东西**：2026-10-30 的新作业里就靠它直接报出了
+`collector.repeat_essay（短文跟读）` 和 `collector.word（Vocabulary）`。
 
 ## 七、上传与回传
 

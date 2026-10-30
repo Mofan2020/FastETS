@@ -116,13 +116,13 @@ if sys.platform == "darwin":
         name="FastETS.app",
         icon=APP_ICON,
         bundle_identifier="cc.fastets.app",
-        version="1.0.6",
+        version="1.0.7",
         info_plist={
             "CFBundleName": "FastETS",
             "CFBundleDisplayName": "FastETS",
             "LSMinimumSystemVersion": "10.15",
             "NSHighResolutionCapable": True,
-            "CFBundleShortVersionString": "1.0.6",
-            "CFBundleVersion": "1.0.6",
+            "CFBundleShortVersionString": "1.0.7",
+            "CFBundleVersion": "1.0.7",
         },
     )

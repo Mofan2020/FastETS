@@ -40,6 +40,9 @@ KNOWN_STRUCTURE_TYPES = frozenset(
         "collector.dialogue",
         "collector.picture",
         "collector.read",
+        "collector.word",
+        "collector.repeat_essay",
+        "collector.repeat_dialogue",
     }
 )
 
@@ -110,6 +113,10 @@ def part_max_score(part_name: str) -> float:
         return 2.0
     if "听后转述" in part_name:
         return 10.0
+    if "短文跟读" in part_name or "短文复述" in part_name:
+        # The official app shows 100 for this 大题 (the sentences of the
+        # passage are graded one by one, ten points each).
+        return 100.0
     if "短文朗读" in part_name:
         return 9.0
     return 5.0
@@ -269,6 +276,7 @@ class Question:
         answer_candidates: Optional[List[str]] = None,
         single_recording: bool = False,
         pack_order: int = 1,
+        sentences: Optional[List[str]] = None,
     ) -> None:
         self.id = question_id
         self.homework_id = homework_id
@@ -297,6 +305,11 @@ class Question:
         # and the item number restarts with every pack - see
         # ``docs/API.md``.
         self.pack_order = int(pack_order or 1)
+        # The sentence list the server knows about (短文跟读 ships one entry
+        # per sentence with its timing).  The score XML has to use exactly
+        # this split, otherwise the marking service cannot map its result
+        # back to the sentences.
+        self.sentences = [s for s in (sentences or []) if s]
 
     # -- classification -----------------------------------------------------
 
@@ -386,6 +399,7 @@ class Question:
             "needs_audio": self.needs_audio,
             "answer_candidates": self.answer_candidates,
             "single_recording": self.single_recording,
+            "sentences": self.sentences,
             "context": self.context,
         }
 
@@ -592,6 +606,70 @@ def parse_content_json(
                 original_text=read_text,
                 max_score=max_score,
                 read_text=read_text,
+            )
+        )
+        return Section(group_name, structure_type, questions)
+
+    if structure_type == "collector.word":
+        # One word per pack: the student reads the word itself.
+        order = order_offset + 1
+        word = clean_text(info.get("value"))
+        questions.append(
+            Question(
+                question_id=_question_id(homework_id, content_url, order, ":word"),
+                homework_id=homework_id,
+                content_url=content_url,
+                order=order,
+                pack_order=1,
+                group_name=group_name,
+                structure_type=structure_type,
+                question_text=clean_text(info.get("translate")) or group_name,
+                answers=[word] if word else [],
+                context=_make_context(payload, homework_id, order, context_base),
+                original_text=word,
+                max_score=max_score,
+                read_text=word,
+                single_recording=True,
+            )
+        )
+        return Section(group_name, structure_type, questions)
+
+    if structure_type in ("collector.repeat_essay", "collector.repeat_dialogue"):
+        # 短文跟读 / 短文复述: ONE passage, ONE recording.
+        #
+        # The pack carries the whole passage in ``info.value`` and its
+        # sentence-by-sentence breakdown in ``info.sublist`` (each entry with
+        # ``seq``, ``text`` and the ``begintime`` / ``endtime`` of that
+        # sentence inside the original audio).  That timeline is what the
+        # server uses to align the student's recording, so the pack is a
+        # single item with a single continuous clip - not one item per
+        # sentence.  Splitting it made the server keep a single sentence and
+        # score the 大题 12 out of 100.
+        sentences: List[str] = []
+        for raw in info.get("sublist") or []:
+            entry = raw if isinstance(raw, dict) else {}
+            text = clean_text(entry.get("text") if entry else raw)
+            if text:
+                sentences.append(text)
+        passage = clean_text(info.get("value")) or " ".join(sentences)
+        order = order_offset + 1
+        questions.append(
+            Question(
+                question_id=_question_id(homework_id, content_url, order, ":essay"),
+                homework_id=homework_id,
+                content_url=content_url,
+                order=order,
+                pack_order=1,
+                group_name=group_name,
+                structure_type=structure_type,
+                question_text="朗读下列短文。",
+                answers=sentences,
+                context=_make_context(payload, homework_id, order, context_base),
+                original_text=passage,
+                max_score=max_score,
+                read_text=passage,
+                single_recording=True,
+                sentences=sentences,
             )
         )
         return Section(group_name, structure_type, questions)

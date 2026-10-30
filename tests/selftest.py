@@ -760,7 +760,7 @@ def test_generic_item_splitting() -> None:
 
     # A pack that carries its items under "sublist" with a "seq" number.
     payload = {
-        "structure_type": "collector.repeat_essay",
+        "structure_type": "collector.mystery",
         "info": {
             "sublist": [
                 {"seq": 1, "value": "The first item to read aloud."},
@@ -770,7 +770,7 @@ def test_generic_item_splitting() -> None:
         },
     }
     section = paper_mod.parse_content_json(payload, "hw", "/f.zip", "课后作业")
-    check("unknown type is not a known structure", not paper_mod.is_known_structure("collector.repeat_essay"))
+    check("unknown type is not a known structure", not paper_mod.is_known_structure("collector.mystery"))
     check("the pack becomes one question per item", len(section.questions) == 3, str(len(section.questions)))
     check(
         "the item number comes from seq",
@@ -841,6 +841,80 @@ def test_generic_item_splitting() -> None:
     )
     check("read stays one question", len(read.questions) == 1, str(len(read.questions)))
     check("read keeps its text", read.questions[0].read_text == "A passage.", read.questions[0].read_text)
+
+
+def test_passage_and_word_types() -> None:
+    """短文跟读 is one passage, 单词 is one word - one item per pack.
+
+    短文跟读 (collector.repeat_essay) ships the whole passage plus its
+    sentence-by-sentence timeline.  Splitting it into one item per sentence
+    made the server keep a single sentence and score the 大题 12 out of 100,
+    so the pack has to stay one item with one continuous recording.
+    """
+    from fastets.core import paper as paper_mod
+    from fastets.core import score as score_mod
+
+    payload = {
+        "structure_type": "collector.repeat_essay",
+        "info": {
+            "value": "Dear friends,<p>Clean water is limited.</p>",
+            "audio": "content.mp3",
+            "sublist": [
+                {"seq": "1", "text": "Dear friends,", "begintime": "0", "endtime": "1.9"},
+                {"seq": "2", "text": "Clean water is limited.", "begintime": "1.9", "endtime": "9.3"},
+            ],
+        },
+    }
+    section = paper_mod.parse_content_json(payload, "hw", "/h.zip", "短文跟读")
+    check("the passage is one question", len(section.questions) == 1, str(len(section.questions)))
+    question = section.questions[0]
+    check("the item number is 1", question.pack_order == 1, str(question.pack_order))
+    check(
+        "the whole passage is read in one recording",
+        len(question.speech_segments()) == 1,
+        str(len(question.speech_segments())),
+    )
+    check(
+        "the passage text is read",
+        "Clean water is limited" in question.read_text,
+        question.read_text[:60],
+    )
+    check(
+        "the sentence list comes from the pack",
+        question.sentences == ["Dear friends,", "Clean water is limited."],
+        str(question.sentences),
+    )
+    check(
+        "the evaluation is a chapter",
+        score_mod.category_for(question.structure_type, question.group_name) == "read_chapter",
+    )
+    check("the 大题 is worth 100 points", paper_mod.part_max_score("短文跟读") == 100.0)
+    xml = score_mod.build_score_xml(
+        question.read_text,
+        "read_chapter",
+        95.0,
+        sentences=list(question.sentences),
+    )
+    check("the XML carries every sentence", xml.count("<sentence ") == 2, str(xml.count("<sentence ")))
+
+    word = paper_mod.parse_content_json(
+        {
+            "structure_type": "collector.word",
+            "info": {"value": "mud", "translate": "泥；淤泥", "xh": "1"},
+        },
+        "hw",
+        "/i.zip",
+        "Vocabulary",
+    )
+    check("the word is one question", len(word.questions) == 1, str(len(word.questions)))
+    check("the word itself is read", word.questions[0].read_text == "mud", word.questions[0].read_text)
+    check(
+        "the word is one recording",
+        len(word.questions[0].speech_segments()) == 1,
+        str(word.questions[0].speech_segments()),
+    )
+    check("the word type is known", paper_mod.is_known_structure("collector.word"))
+    check("the passage type is known", paper_mod.is_known_structure("collector.repeat_essay"))
 
 
 def test_speex_frames() -> None:
@@ -1671,6 +1745,7 @@ def main() -> int:
         test_item_number_restarts_per_pack,
         test_response_candidates,
         test_generic_item_splitting,
+        test_passage_and_word_types,
         test_log_redaction,
         test_config,
         test_live_api,
