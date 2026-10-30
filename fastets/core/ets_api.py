@@ -7,6 +7,7 @@ raw notes.
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Any, Dict, List, Optional
 
@@ -49,6 +50,19 @@ class EtsApiError(RuntimeError):
 
 # Secrets that must never reach the log file ---------------------------------
 _SECRET_PARAMS = ("password", "token", "code", "suc_user_token", "login")
+
+# Keys of an assignment that describe how the server booked it.  They are
+# written into the log so a run shows the score / 完成 state of every 大题.
+_SCORE_KEY_HINTS = (
+    "point",
+    "score",
+    "complete",
+    "pass",
+    "ratio",
+    "progress",
+    "finish",
+    "status",
+)
 
 
 def redact_params(params: Dict[str, Any]) -> Dict[str, Any]:
@@ -194,7 +208,56 @@ class EtsApiClient:
             payload = payload[0]
         if not isinstance(payload, dict):
             raise EtsApiError(f"/{route} 返回格式不正确", route=route)
+        self._log_response(route, payload)
         return payload
+
+    def _log_response(self, route: str, payload: Dict[str, Any]) -> None:
+        """Write the interesting part of a response into the log file.
+
+        The server tells us how it booked an answer (the score of the 大题,
+        whether it counts as 完成 / 通过) - without that line there is no way
+        to tell a rejected answer from one that was simply never sent.
+        """
+        if not self._log:
+            return
+        if route == ROUTE_AUDIO_SYNC:
+            body = payload.get("body")
+            self._log_info(
+                "ETS 回应 /%s：%s", route, json.dumps(body, ensure_ascii=False)[:600]
+            )
+            return
+        if route != ROUTE_HOMEWORK_LIST:
+            return
+        body = payload.get("body")
+        if not isinstance(body, dict):
+            return
+        for row in body.get("data") or []:
+            if not isinstance(row, dict):
+                continue
+            fields = {
+                key: value
+                for key, value in row.items()
+                if any(hint in str(key).lower() for hint in _SCORE_KEY_HINTS)
+            }
+            struct = row.get("struct")
+            struct = struct if isinstance(struct, dict) else {}
+            contents = []
+            for entry in struct.get("contents") or []:
+                if not isinstance(entry, dict):
+                    continue
+                contents.append(
+                    {
+                        key: entry.get(key)
+                        for key in ("group_name", "real_id", "entity_type", "read_type")
+                    }
+                )
+            self._log_info(
+                "ETS 作业 %s「%s」：%s | 大题 %s",
+                row.get("id"),
+                row.get("name"),
+                fields,
+                contents,
+            )
 
     def _check_payload(
         self,

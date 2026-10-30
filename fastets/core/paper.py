@@ -106,7 +106,12 @@ def split_sentences(text: str) -> List[str]:
 
 
 def part_max_score(part_name: str) -> float:
-    """Total score of one 大题, mirroring the official client."""
+    """Total score of one 大题, mirroring the official client.
+
+    The authoritative value comes from the pack's own ``paper.res`` (see
+    :func:`parse_paper_res`); this is only the fallback for packs that do not
+    ship one.  短文跟读 is worth 10 points - one point per 段.
+    """
     if "听后选择" in part_name:
         return 1.5
     if "听后回答" in part_name:
@@ -114,12 +119,91 @@ def part_max_score(part_name: str) -> float:
     if "听后转述" in part_name:
         return 10.0
     if "短文跟读" in part_name or "短文复述" in part_name:
-        # The official app shows 100 for this 大题 (the sentences of the
-        # passage are graded one by one, ten points each).
-        return 100.0
+        # One point per sentence of the passage (the official 卷面 XML lists
+        # one item with MaxScore=1 per 段).
+        return 10.0
     if "短文朗读" in part_name:
         return 9.0
     return 5.0
+
+
+# --- the official 卷面 XML (paper.res) -----------------------------------------
+
+
+def parse_paper_res(text: str) -> Dict[str, Any]:
+    """Parse the official 卷面 XML (``paper.res``) of a resource pack.
+
+    The file describes every 大题 of the pack: its caption, its scoring
+    category and the answerable items with their maximum score::
+
+        <section caption="短文跟读" category="read_sentence" order="0">
+          <item caption="subitem" itemcount="1" MaxScore="1"><id>592132_1</id></item>
+          ...
+        </section>
+
+    For 短文跟读 it lists **one item per 段** (the ids are ``<stid>_<n>``), each
+    worth one point.  That is the official segmentation of the 大题: the pack
+    holds a single 題 (the passage) and the server expects one recording per
+    段.
+    """
+    import xml.etree.ElementTree as ET
+
+    result: Dict[str, Any] = {"sections": []}
+    if not text:
+        return result
+    try:
+        root = ET.fromstring(text.lstrip("\ufeff").strip())
+    except ET.ParseError:
+        return result
+    sections: List[Dict[str, Any]] = []
+    for node in root.iter("section"):
+        items: List[Dict[str, Any]] = []
+        for item in node.findall("item"):
+            try:
+                max_score = float(item.get("MaxScore") or 0)
+            except (TypeError, ValueError):
+                max_score = 0.0
+            try:
+                itemcount = int(item.get("itemcount") or 1)
+            except (TypeError, ValueError):
+                itemcount = 1
+            items.append(
+                {
+                    "id": (item.findtext("id") or "").strip(),
+                    "caption": item.get("caption") or "",
+                    "itemcount": itemcount,
+                    "max_score": max_score,
+                }
+            )
+        if not items:
+            # The outer "ALL" section only groups the 大题 - it carries no
+            # answerable item of its own.
+            continue
+        sections.append(
+            {
+                "caption": node.get("caption") or "",
+                "category": node.get("category") or "",
+                "items": items,
+            }
+        )
+    result["sections"] = sections
+    return result
+
+
+def paper_res_section(
+    paper_res: Optional[Dict[str, Any]], stid: str
+) -> Optional[Dict[str, Any]]:
+    """The section of ``paper.res`` that belongs to the item ``stid``.
+
+    The ids of a 短文跟读 section are ``<stid>_<n>`` - one per 段 - so the
+    section is found by that prefix.
+    """
+    prefix = f"{stid}_"
+    for section in (paper_res or {}).get("sections") or []:
+        items = section.get("items") or []
+        if any(str(item.get("id") or "").startswith(prefix) for item in items):
+            return section
+    return None
 
 
 # --- deep lookup --------------------------------------------------------------
@@ -277,6 +361,9 @@ class Question:
         single_recording: bool = False,
         pack_order: int = 1,
         sentences: Optional[List[str]] = None,
+        record_per_segment: bool = False,
+        segment_max_scores: Optional[List[float]] = None,
+        paper_category: str = "",
     ) -> None:
         self.id = question_id
         self.homework_id = homework_id
@@ -306,10 +393,22 @@ class Question:
         # ``docs/API.md``.
         self.pack_order = int(pack_order or 1)
         # The sentence list the server knows about (短文跟读 ships one entry
-        # per sentence with its timing).  The score XML has to use exactly
-        # this split, otherwise the marking service cannot map its result
+        # per 段 with its timing).  The score XML has to use exactly this
+        # split, otherwise the marking service cannot map its result
         # back to the sentences.
         self.sentences = [s for s in (sentences or []) if s]
+        # One question, one recording per 段.  This is how the official client
+        # answers 短文跟读: the pack holds one 題 (the whole passage) and the
+        # server expects one record per sentence of it - the 段 index is the
+        # second half of the answer key (``serial_id``).
+        self.record_per_segment = bool(record_per_segment)
+        # The score of every 段 (from the official 卷面 XML).  Empty when the
+        # pack does not ship one - the score is then split evenly.
+        self.segment_max_scores = [
+            float(value) for value in (segment_max_scores or []) if value
+        ]
+        # The scoring category of the 大题 (``read_sentence`` for 短文跟读).
+        self.paper_category = str(paper_category or "")
 
     # -- classification -----------------------------------------------------
 
@@ -360,7 +459,9 @@ class Question:
         """The text that has to be spoken, split into segments.
 
         The official client records one clip per sentence for 跟读 / 朗读, while
-        短文朗读 and 信息转述 are submitted as a single recording.  ``text``
+        短文朗读 and 信息转述 are submitted as a single recording.  短文跟读
+        (passage) is the special case: the pack is **one** question with one
+        recording per 段, and the 段 list comes from the pack itself.  ``text``
         overrides the parsed text, which is how 复述 / 表达 read one of the
         sample answers instead of the source material.
         """
@@ -369,6 +470,9 @@ class Question:
         text = text or self.read_text or self.original_text or self.question_text
         if not text:
             return []
+        if self.record_per_segment:
+            # One recording per 段 of the passage.
+            return list(self.sentences) if self.sentences else [text]
         kind = self.kind
         if kind in ("短文朗读", "模仿朗读", "信息转述") or self.is_response:
             # One recording for the whole passage / the whole answer.
@@ -400,6 +504,9 @@ class Question:
             "answer_candidates": self.answer_candidates,
             "single_recording": self.single_recording,
             "sentences": self.sentences,
+            "record_per_segment": self.record_per_segment,
+            "segment_max_scores": self.segment_max_scores,
+            "paper_category": self.paper_category,
             "context": self.context,
         }
 
@@ -407,15 +514,29 @@ class Question:
 class Section:
     """One 大题 (a group of questions sharing a resource pack)."""
 
-    def __init__(self, group_name: str, structure_type: str, questions: List[Question]) -> None:
+    def __init__(
+        self,
+        group_name: str,
+        structure_type: str,
+        questions: List[Question],
+        max_score: Optional[float] = None,
+        category: str = "",
+    ) -> None:
         self.group_name = group_name
         self.structure_type = structure_type
         self.questions = questions
+        # The official total of this 大题 (from ``paper.res``).  ``None`` means
+        # "use the built-in table".
+        self.max_score = max_score
+        # The official scoring category (``read_sentence`` for 短文跟读).
+        self.category = category
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "group_name": self.group_name,
             "structure_type": self.structure_type,
+            "max_score": self.max_score,
+            "category": self.category,
             "questions": [q.to_dict() for q in self.questions],
         }
 
@@ -432,8 +553,14 @@ def parse_content_json(
     group_name: str,
     context_base: Optional[Dict[str, Any]] = None,
     order_offset: int = 0,
+    paper_res: Optional[Dict[str, Any]] = None,
 ) -> Section:
-    """Turn one ``content.json`` into a :class:`Section`."""
+    """Turn one ``content.json`` into a :class:`Section`.
+
+    ``paper_res`` is the parsed official 卷面 XML of the same pack (see
+    :func:`parse_paper_res`).  It carries the authoritative segmentation and
+    the score of every item of the 大题.
+    """
     context_base = context_base or {}
     structure_type = str(payload.get("structure_type") or "")
     info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
@@ -635,16 +762,20 @@ def parse_content_json(
         return Section(group_name, structure_type, questions)
 
     if structure_type in ("collector.repeat_essay", "collector.repeat_dialogue"):
-        # 短文跟读 / 短文复述: ONE passage, ONE recording.
+        # 短文跟读 / 短文复述: ONE question, ONE recording per 段.
         #
         # The pack carries the whole passage in ``info.value`` and its
         # sentence-by-sentence breakdown in ``info.sublist`` (each entry with
         # ``seq``, ``text`` and the ``begintime`` / ``endtime`` of that
-        # sentence inside the original audio).  That timeline is what the
-        # server uses to align the student's recording, so the pack is a
-        # single item with a single continuous clip - not one item per
-        # sentence.  Splitting it made the server keep a single sentence and
-        # score the 大题 12 out of 100.
+        # sentence inside the original audio).  The official 卷面 XML
+        # (``paper.res``) lists one item per 段 - ``592132_1`` ...
+        # ``592132_10``, each worth one point - and the official control file
+        # of the item records one clip per 段.  So the answer key is
+        # "one item (order=1) + one recording per 段 (serial_id = 0..n-1)".
+        #
+        # Both earlier attempts failed: one record per sentence with the item
+        # number growing (1..n) addressed items that do not exist, and a
+        # single record for the whole passage answered a single 段.
         sentences: List[str] = []
         for raw in info.get("sublist") or []:
             entry = raw if isinstance(raw, dict) else {}
@@ -652,6 +783,25 @@ def parse_content_json(
             if text:
                 sentences.append(text)
         passage = clean_text(info.get("value")) or " ".join(sentences)
+
+        stid = str(info.get("stid") or "")
+        section_info = paper_res_section(paper_res, stid)
+        res_items = list((section_info or {}).get("items") or [])
+        segment_scores: List[float] = []
+        total_max = 0.0
+        if res_items:
+            total_max = sum(float(item.get("max_score") or 0) for item in res_items)
+            if len(res_items) == len(sentences):
+                # The official list is the segmentation - one item per 段.
+                segment_scores = [
+                    float(item.get("max_score") or 0) for item in res_items
+                ]
+        if not total_max:
+            total_max = part_max_score(group_name)
+        if not segment_scores:
+            share = total_max / max(len(sentences), 1)
+            segment_scores = [share] * len(sentences)
+
         order = order_offset + 1
         questions.append(
             Question(
@@ -669,13 +819,21 @@ def parse_content_json(
                 answers=[],
                 context=_make_context(payload, homework_id, order, context_base),
                 original_text=passage,
-                max_score=max_score,
+                max_score=total_max,
                 read_text=passage,
-                single_recording=True,
                 sentences=sentences,
+                record_per_segment=True,
+                segment_max_scores=segment_scores,
+                paper_category=str((section_info or {}).get("category") or ""),
             )
         )
-        return Section(group_name, structure_type, questions)
+        return Section(
+            group_name,
+            structure_type,
+            questions,
+            max_score=total_max,
+            category=str((section_info or {}).get("category") or ""),
+        )
 
     # An unknown structure type: if the pack carries a list of items, split it
     # into one question per item.  Without this the whole pack would be

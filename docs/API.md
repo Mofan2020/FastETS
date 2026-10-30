@@ -151,22 +151,42 @@ password       = MD5(seed).upper() + MD5(上述大写 hex 的 ASCII).upper()
 `info.audio`。所以它就是**一个 item（order=1）、一条录音**，读的是 `info.value` 里的那个词。
 实测一份作业的 Vocabulary 大题有 43 个这样的包（871333…871375），每包一词。
 
-### collector.repeat_essay —— 一篇短文一条录音
+### collector.repeat_essay —— 一道题、每段一条录音
 
 `info.value` 是**整篇短文**，`info.sublist` 是它的分句表，每句带 `seq`、`text`、
 `translate`，以及该句在原音频里的 `begintime` / `endtime`（实测一篇 10 句、约 50 秒，
 时间轴从 0 连续到 49.9）。
 
-**这个包是一个 item（order=1）、一条连续录音**，不是「一句一个 item」：
+**这个包是「一个 item + 每段一条录音」**。这一点由资源包里的两份官方文件确定：
 
-- 服务端是按「资源包 + 包内题号」记账的，而我们早期把分句表拆成了 10 个 item
-  （order 1…10），服务端只认下 order=1 那一条（第一句），于是这道大题只得了
-  **12 / 100 分**，官方 App 里显示一个不完整的朗读记录；
-- `begintime` / `endtime` 是**原音频的时间轴**，服务端要靠它把学生的一整段录音
-  对齐到每一句——所以录音必须是一整段，不能一句一条。
+```
+paper.res                                   # 官方卷面 XML
+<section caption="短文跟读" category="read_sentence" order="0">
+  <item caption="subitem" itemcount="1" MaxScore="1"><id>592132_1</id></item>
+  ...  共 10 条，每条 1 分
+</section>
 
-评测 XML 用 `read_chapter` 类别，并且**逐句列表直接取资源包里的 `sublist`**（不自己
-按标点切句），这样评测服务能按序号把结果对回每一句。大题满分按官方 App 的 100 分算。
+592132_1.ctrl                               # 官方控制文件（每段一个）
+{"id":"592132","comment":"跟读题型","proto":"item.passage","set":[
+  {"type":"action.record","filename":"592132_1","playtime":3.66,"playhint":"录音中"}, ...]}
+```
+
+- 整篇短文在服务端只有**一个 item**（`stid=592132`），也就是 `order=1`；十句话是它的
+  十段（`paper.res` 的 item id 就是 `592132_1` … `592132_10`），官方客户端对每一段
+  单独录一条音（`action.record` 的 filename 就是段号）。
+- 早先两个方向都是错的：**v1.0.5** 把分句表拆成 10 个 item（order 1…10），服务端只认
+  order=1 那一条，其余九条成了废记录；**v1.0.8** 把整篇录成一条，item 号对了但十段里
+  只答了一段。两次都停在 12 分。
+- 正确的键是 **`(entity_id, order=1, serial_id=段序号)`**：`serial_id` 从 0 递增到
+  N-1，`order` 始终是 1。
+- 每条录音的评测 XML **只描述它自己那一段**（`read_chapter` 类别，句表只有一段），
+  不把整篇塞进同一份 XML。
+- 分值直接取官方卷面：每段 `MaxScore=1` 分，整道大题 8 分或 10 分（取决于包里的段数）。
+  没有 `paper.res` 时按 10 分兜底。
+
+`paper.res` 是每个资源包里都有的官方卷面 XML（`fastets/core/paper.py` 的
+`parse_paper_res()` 会解析它），它同时给出大题的分值、分类（`read_sentence`）和
+每道 item 的满分。
 
 ### 未知 structure_type 的通用拆分
 
@@ -284,6 +304,10 @@ FastETS 早期把 `order` 发成了「整份卷子里的第几题」，而卷子
 
 > v1.0.4 曾把 `serial_id` 当成「包内第几条记录」并按包递增，那次改动对完成度
 > 没有影响（实测 v1.0.4 仍是 75%），已在 v1.0.6 改回「题内第几段」。
+>
+> v1.0.9 在短文跟读上**证实**了这个模型：官方卷面 XML（`paper.res`）里整篇短文只有
+> 一个 item（`order=1`），十句话是它的十段，官方控制文件对每段各录一条音——所以键是
+> `(entity_id, order=1, serial_id=0…N-1)`。
 
 选择题用同一个路由，但 `upload_file_url` / `spx_file_url` / `detail_file_url` 留空，
 `upload_file_id` 固定为 `"0"`，并在 `score_detail.choose` 里带上所选项。

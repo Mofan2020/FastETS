@@ -843,13 +843,36 @@ def test_generic_item_splitting() -> None:
     check("read keeps its text", read.questions[0].read_text == "A passage.", read.questions[0].read_text)
 
 
+PAPER_RES_TEMPLATE = """<?xml version="1.0" encoding="utf-8"?>
+<paper>
+<id>550889</id>
+<comment>a</comment>
+<section caption="ALL">
+<section caption="{caption}" category="read_sentence" order="0">
+{items}
+</section>
+</section>
+</paper>
+"""
+
+
+def _paper_res(caption: str, stid: str, count: int, max_score: str = "1") -> str:
+    items = "\n".join(
+        f'<item caption="subitem" itemcount="1"  MaxScore="{max_score}">'
+        f"<id>{stid}_{index}</id></item>"
+        for index in range(1, count + 1)
+    )
+    return PAPER_RES_TEMPLATE.format(caption=caption, items=items)
+
+
 def test_passage_and_word_types() -> None:
-    """短文跟读 is one passage, 单词 is one word - one item per pack.
+    """短文跟读 is one item with one recording per 段 - 单词 is one word.
 
     短文跟读 (collector.repeat_essay) ships the whole passage plus its
-    sentence-by-sentence timeline.  Splitting it into one item per sentence
-    made the server keep a single sentence and score the 大题 12 out of 100,
-    so the pack has to stay one item with one continuous recording.
+    sentence-by-sentence timeline, and the official 卷面 XML (``paper.res``)
+    lists one item per 段 with one point each.  The official control file of
+    the item records one clip per 段, so the answer key is "one item
+    (order=1) + one recording per 段 (serial_id = 0..n-1)".
     """
     from fastets.core import paper as paper_mod
     from fastets.core import score as score_mod
@@ -857,6 +880,7 @@ def test_passage_and_word_types() -> None:
     payload = {
         "structure_type": "collector.repeat_essay",
         "info": {
+            "stid": "592132",
             "value": "Dear friends,<p>Clean water is limited.</p>",
             "audio": "content.mp3",
             "sublist": [
@@ -865,14 +889,17 @@ def test_passage_and_word_types() -> None:
             ],
         },
     }
-    section = paper_mod.parse_content_json(payload, "hw", "/h.zip", "短文跟读")
+    paper_res = paper_mod.parse_paper_res(_paper_res("短文跟读", "592132", 2))
+    section = paper_mod.parse_content_json(
+        payload, "hw", "/h.zip", "短文跟读", paper_res=paper_res
+    )
     check("the passage is one question", len(section.questions) == 1, str(len(section.questions)))
     question = section.questions[0]
     check("the item number is 1", question.pack_order == 1, str(question.pack_order))
     check(
-        "the whole passage is read in one recording",
-        len(question.speech_segments()) == 1,
-        str(len(question.speech_segments())),
+        "every 段 is a recording of its own",
+        len(question.speech_segments()) == 2,
+        str(question.speech_segments()),
     )
     check(
         "the passage text is read",
@@ -885,17 +912,26 @@ def test_passage_and_word_types() -> None:
         str(question.sentences),
     )
     check(
+        "every 段 is worth one point",
+        question.segment_max_scores == [1.0, 1.0],
+        str(question.segment_max_scores),
+    )
+    check("the 大题 is worth two points", section.max_score == 2.0, str(section.max_score))
+    check("the official category is kept", section.category == "read_sentence", section.category)
+    check(
         "the evaluation is a chapter",
         score_mod.category_for(question.structure_type, question.group_name) == "read_chapter",
     )
-    check("the 大题 is worth 100 points", paper_mod.part_max_score("短文跟读") == 100.0)
+    check("the 大题 is worth 10 points without a 卷面 XML", paper_mod.part_max_score("短文跟读") == 10.0)
+
+    # The XML of one recording describes exactly that 段.
     xml = score_mod.build_score_xml(
-        question.read_text,
+        question.speech_segments()[1],
         "read_chapter",
-        95.0,
-        sentences=list(question.sentences),
+        1.0,
+        sentences=[question.speech_segments()[1]],
     )
-    check("the XML carries every sentence", xml.count("<sentence ") == 2, str(xml.count("<sentence ")))
+    check("the XML carries only the recorded 段", xml.count("<sentence ") == 1, str(xml.count("<sentence ")))
 
     word = paper_mod.parse_content_json(
         {
@@ -915,6 +951,94 @@ def test_passage_and_word_types() -> None:
     )
     check("the word type is known", paper_mod.is_known_structure("collector.word"))
     check("the passage type is known", paper_mod.is_known_structure("collector.repeat_essay"))
+
+
+def test_paper_res_parsing() -> None:
+    """The official 卷面 XML gives the score of every item of a 大题."""
+    from fastets.core import paper as paper_mod
+
+    res = paper_mod.parse_paper_res(_paper_res("短文跟读", "592132", 3, "2"))
+    check("one section is parsed", len(res.get("sections") or []) == 1, str(res.get("sections")))
+    section = res["sections"][0]
+    check("the caption is read", section["caption"] == "短文跟读", section["caption"])
+    check("the category is read", section["category"] == "read_sentence", section["category"])
+    check("three items are read", len(section["items"]) == 3, str(len(section["items"])))
+    check(
+        "the item ids carry the segment number",
+        [item["id"] for item in section["items"]]
+        == ["592132_1", "592132_2", "592132_3"],
+        str([item["id"] for item in section["items"]]),
+    )
+    check(
+        "the score of every item is read",
+        all(item["max_score"] == 2.0 for item in section["items"]),
+        str([item["max_score"] for item in section["items"]]),
+    )
+    found = paper_mod.paper_res_section(res, "592132")
+    check("the section is found by its stid", found is not None)
+    check(
+        "another stid is not matched",
+        paper_mod.paper_res_section(res, "999999") is None,
+    )
+    check("broken XML does not crash", paper_mod.parse_paper_res("<not xml")["sections"] == [])
+    check("an empty file does not crash", paper_mod.parse_paper_res("")["sections"] == [])
+
+
+def test_passage_submission_keys() -> None:
+    """A 短文跟读 answer is one item with one recording per 段.
+
+    The order stays 1 (the passage is a single item of the pack) and the
+    段 index is the ``serial_id`` - that is the key the server uses.
+    """
+    from fastets.core import paper as paper_mod
+    from fastets.core.completer import LoadedPaper
+
+    offline = _offline_completer()
+    if offline is None:
+        return
+    completer, submitted, uploaded, restore = offline
+    try:
+        payload = {
+            "structure_type": "collector.repeat_essay",
+            "info": {
+                "stid": "592132",
+                "value": "Dear friends,<p>Clean water is limited.</p>",
+                "sublist": [
+                    {"seq": "1", "text": "Dear friends,"},
+                    {"seq": "2", "text": "Clean water is limited."},
+                    {"seq": "3", "text": "We must protect water."},
+                ],
+            },
+        }
+        paper_res = paper_mod.parse_paper_res(_paper_res("短文跟读", "592132", 3))
+        section = paper_mod.parse_content_json(
+            payload, "h1", "/h.zip", "短文跟读", paper_res=paper_res
+        )
+        question = section.questions[0]
+        question.context = {
+            "homework_id": "h1",
+            "set_id": "s1",
+            "entity_id": "592132",
+            "resource_id": "240",
+        }
+        paper = LoadedPaper({"id": "h1", "name": "测试作业"}, [section])
+        report = completer.complete_homework(
+            {"id": "h1", "name": "测试作业"}, paper=paper, dry_run=False
+        )
+    finally:
+        restore()
+
+    check("the passage question succeeded", report.get("failed") == 0, str(report.get("failed")))
+    check("one submission per 段", len(submitted) == 3, str(len(submitted)))
+    orders = [item.get("context", {}).get("order") for item in submitted]
+    serials = [item.get("context", {}).get("serial_id") for item in submitted]
+    check("the item number stays 1", orders == ["1", "1", "1"], str(orders))
+    check("the 段 index is the serial id", serials == ["0", "1", "2"], str(serials))
+    entities = {item.get("context", {}).get("entity_id") for item in submitted}
+    check("all recordings belong to the item", entities == {"592132"}, str(entities))
+    scores = [float(item.get("score", 0)) for item in submitted]
+    check("every 段 is worth one point", scores == [1.0, 1.0, 1.0], str(scores))
+
 
 
 def test_speex_frames() -> None:
@@ -1745,7 +1869,9 @@ def main() -> int:
         test_item_number_restarts_per_pack,
         test_response_candidates,
         test_generic_item_splitting,
+        test_paper_res_parsing,
         test_passage_and_word_types,
+        test_passage_submission_keys,
         test_log_redaction,
         test_config,
         test_live_api,

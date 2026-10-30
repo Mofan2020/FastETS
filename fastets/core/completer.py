@@ -360,6 +360,10 @@ class Completer:
                 zipcrypto.extract_resource_pack(data, target)
 
             payload = zipcrypto.read_content_json(target)
+            # The official 卷面 XML of the pack: it knows the real score of
+            # every item of the 大题 and - for 短文跟读 - the official
+            # segmentation of the passage (one item per 段).
+            paper_res = paper_mod.parse_paper_res(_read_text(zipcrypto.find_paper_res(target)))
             offset = offsets.get(group_name, 0)
             section = paper_mod.parse_content_json(
                 payload,
@@ -368,10 +372,19 @@ class Completer:
                 group_name,
                 context_base={"set_id": set_id, "resource_id": resource_id},
                 order_offset=offset,
+                paper_res=paper_res,
             )
             sections.append(section)
             offsets[group_name] = offset + len(section.questions)
             structure_type = str(payload.get("structure_type") or "")
+            if section.max_score:
+                self._info(
+                    "大题 %s（%s）官方分值 %s%s",
+                    group_name or "未命名大题",
+                    structure_type or "未知题型",
+                    section.max_score,
+                    f"，分类 {section.category}" if section.category else "",
+                )
             if not paper_mod.is_known_structure(structure_type):
                 # Worth a log line: the type name is what is needed to write an
                 # exact parser for this pack shape.
@@ -534,7 +547,7 @@ class Completer:
             self._check_cancel()
             if section_index > 0:
                 self.pacer.section()
-            section_max = paper_mod.part_max_score(section.group_name)
+            section_max = section.max_score or paper_mod.part_max_score(section.group_name)
             per_question_max = section_max / max(len(section.questions), 1)
 
             for question in section.questions:
@@ -612,7 +625,18 @@ class Completer:
                 "message": "没有可朗读的文本",
             }
 
-        segment_max = per_question_max / len(segments)
+        # The score of every recording.  短文跟读 knows the official score of
+        # every 段 (one point each); everything else shares the score of the
+        # question evenly.
+        if (
+            question.segment_max_scores
+            and len(question.segment_max_scores) == len(segments)
+        ):
+            segment_maxes = list(question.segment_max_scores)
+        else:
+            share = per_question_max / len(segments)
+            segment_maxes = [share] * len(segments)
+
         results: List[Dict[str, Any]] = []
         for segment_index, text in enumerate(segments):
             self._check_cancel()
@@ -622,7 +646,7 @@ class Completer:
                     uploader,
                     question,
                     text,
-                    segment_max,
+                    segment_maxes[segment_index],
                     segment_index,
                     len(segments),
                     label,
@@ -708,11 +732,17 @@ class Completer:
         category = score_mod.category_for(question.structure_type, question.group_name)
         target_score = self._score_for(question, segment_max, text, duration_ms)
         score_value = score_mod.clamp_score(target_score, segment_max)
+        # The XML describes exactly what was recorded.  For a question with one
+        # recording per 段 that is the single 段 - the official client evaluates
+        # every 段 on its own, so the XML must not carry the whole passage.
+        xml_sentences = (
+            [text] if question.record_per_segment else list(question.sentences or [])
+        )
         xml_text = score_mod.build_score_xml(
             text,
             category,
             target_score,
-            sentences=list(question.sentences or []),
+            sentences=xml_sentences,
         )
         xml_path = config.audio_cache_dir() / f"{crypto.random_hex(16)}.xml"
         xml_path.write_text(xml_text, encoding="utf-8")
@@ -752,7 +782,7 @@ class Completer:
         xml_result = uploader.upload(xml_path, "xml")
 
         score_data = score_mod.build_score_data(
-            category, float(score_value), maximum=max(segment_max, 5.0)
+            category, float(score_value), maximum=segment_max if segment_max > 0 else 5.0
         )
 
         context = dict(question.context)
@@ -770,13 +800,24 @@ class Completer:
         context["use_time"] = max(1, int(round((duration_ms or 0) / 1000.0)))
         context["correct"] = 1
 
+        self._info(
+            "提交 %s：entity=%s order=%s serial=%s 分值=%s（满分 %s，共 %d 段）",
+            label,
+            context.get("entity_id"),
+            context["order"],
+            context["serial_id"],
+            score_value,
+            segment_max,
+            segment_count,
+        )
+
         self.pacer.request()
         mark_error: Optional[EtsApiError] = None
         attempts = max(1, int(self.settings.get("mark_retries", 2) or 0) + 1)
         for attempt in range(1, attempts + 1):
             self._check_cancel()
             try:
-                self.client.submit_audio(
+                response = self.client.submit_audio(
                     token=token,
                     context=context,
                     score=score_value,
@@ -785,6 +826,7 @@ class Completer:
                     speex_url=speex_url,
                     xml_url=xml_result["url"],
                 )
+                self._info("ETS 回应 %s：%s", label, _short(response))
                 mark_error = None
                 break
             except EtsApiError as exc:
@@ -934,6 +976,25 @@ def _join_url(base_url: str, path: str) -> str:
         return path.replace("http://", "https://", 1)
     base = base_url.replace("http://", "https://", 1).rstrip("/")
     return f"{base}/{path.lstrip('/')}"
+
+
+def _read_text(path: Optional[Path]) -> str:
+    """Read a text file of the resource pack - empty when it is missing."""
+    if not path:
+        return ""
+    try:
+        return Path(path).read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return ""
+
+
+def _short(payload: Any, limit: int = 300) -> str:
+    """A short, printable form of a server response (for the log)."""
+    try:
+        text = json.dumps(payload, ensure_ascii=False)
+    except (TypeError, ValueError):
+        text = str(payload)
+    return text if len(text) <= limit else text[:limit] + "…"
 
 
 def _cleanup(*paths: Path) -> None:

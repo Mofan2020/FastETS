@@ -297,7 +297,28 @@ function renderPapers() {
         row.className = 'paper-q';
         const candidates = q.answer_candidates || [];
         row.innerHTML = `<div class="paper-q-text">第 ${q.order} 题 · ${escapeHtml(q.kind || '')} · 满分 ${q.max_score}</div>`;
-        if (candidates.length > 1) {
+        if (q.record_per_segment && (q.sentences || []).length) {
+          // 短文跟读：整篇短文，每一段单独录一条录音。
+          const note = document.createElement('div');
+          note.className = 'paper-q-body';
+          note.textContent = `整篇短文，共 ${q.sentences.length} 段，每段单独录一条录音：`;
+          row.appendChild(note);
+          const list = document.createElement('ol');
+          list.className = 'answer-list preview-list';
+          q.sentences.forEach((text) => {
+            const item = document.createElement('li');
+            item.className = 'answer-item';
+            const body = document.createElement('div');
+            body.className = 'answer-body';
+            const para = document.createElement('p');
+            para.className = 'answer-text';
+            para.textContent = text;
+            body.appendChild(para);
+            item.appendChild(body);
+            list.appendChild(item);
+          });
+          row.appendChild(list);
+        } else if (candidates.length > 1) {
           // 交际应答 / 复述 / 表达：多份备选答案，朗读时只读其中一份。
           const note = document.createElement('div');
           note.className = 'paper-q-body';

@@ -106,6 +106,21 @@ def find_content_json(root: Path) -> Optional[Path]:
     return None
 
 
+def find_paper_res(root: Path) -> Optional[Path]:
+    """Locate the official 卷面 XML (``paper.res``) of an extracted pack.
+
+    It carries the item list of the 大题 with the score of every item - for
+    短文跟读 it is the authoritative segmentation of the passage (one item per
+    段).  Not every pack ships one.
+    """
+    direct = root / "paper.res"
+    if direct.exists():
+        return direct
+    for candidate in root.rglob("paper.res"):
+        return candidate
+    return None
+
+
 def cache_path_for(url: str, suffix: str = ".zip") -> Path:
     """Stable cache file name for a resource URL."""
     import hashlib
