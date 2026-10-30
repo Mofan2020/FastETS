@@ -663,7 +663,10 @@ def parse_content_json(
                 group_name=group_name,
                 structure_type=structure_type,
                 question_text="朗读下列短文。",
-                answers=sentences,
+                # The passage has no "answers" - the sentences are kept in
+                # ``sentences`` so the preview shows the passage itself
+                # instead of a list joined with slashes.
+                answers=[],
                 context=_make_context(payload, homework_id, order, context_base),
                 original_text=passage,
                 max_score=max_score,
