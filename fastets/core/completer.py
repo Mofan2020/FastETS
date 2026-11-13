@@ -302,6 +302,18 @@ class Completer:
             except EtsApiError as exc:
                 self._info("重置路由返回: %s（继续用重新提交方式重做）", exc)
 
+        # 官方清分：把服务端原来记下的分数（以及那些用错键留下的废记录）清掉，
+        # 否则大题总分里会混着旧记录，官方 App 里就会出现「12 分 / 10 分」这种
+        # 超过满分的显示。
+        if not dry_run and bool(self.settings.get("score_drop_before_redo", True)):
+            try:
+                token = self.session.token or self.session.ensure_fresh_token()
+                self.pacer.request()
+                self.client.score_drop(token, str(homework.get("id") or ""))
+                self._info("重做：已清除服务端原有的分数与记录")
+            except Exception as exc:  # noqa: BLE001 - the run continues anyway
+                self._info("清除服务端原有分数失败（继续提交）: %s", exc)
+
         report = self.complete_homework(homework, dry_run=dry_run)
         report["mode"] = "redo"
         return report
@@ -500,13 +512,20 @@ class Completer:
             )
 
     def _score_for(
-        self, question: paper_mod.Question, segment_max: float, text: str, duration_ms: int
+        self, question: paper_mod.Question, text: str, duration_ms: int
     ) -> float:
+        """The ISE score (0 - 5) of one recording.
+
+        The server books an answer as ``score / 5 * 该题官方满分``, so the
+        value that travels to ETS has to be on the ISE scale - sending the
+        *point value* of the question (1.0, 1.5 …) would be booked as a fifth
+        of the points it should be.
+        """
         mode = str(self.settings.get("score_mode") or "target")
         if mode == "estimate":
-            return score_mod.estimate_score(text, duration_ms, segment_max)
+            return score_mod.estimate_score(text, duration_ms, score_mod.ISE_FULL_SCORE)
         ratio = float(self.settings.get("target_score_ratio", 1.0) or 1.0)
-        return max(0.0, min(segment_max, segment_max * ratio))
+        return max(0.0, min(score_mod.ISE_FULL_SCORE, score_mod.ISE_FULL_SCORE * ratio))
 
     # -- submission ----------------------------------------------------------
 
@@ -543,12 +562,16 @@ class Completer:
         }
 
         completed = 0
+        total_seconds = 0
+        booked_points = 0.0
+        paper_total = 0.0
         for section_index, section in enumerate(paper.sections):
             self._check_cancel()
             if section_index > 0:
                 self.pacer.section()
             section_max = section.max_score or paper_mod.part_max_score(section.group_name)
             per_question_max = section_max / max(len(section.questions), 1)
+            paper_total += section_max
 
             for question in section.questions:
                 self._check_cancel()
@@ -570,6 +593,12 @@ class Completer:
                     if item.get("status") == "submitted-unconfirmed":
                         report["unconfirmed"] += 1
                     completed += 1
+                    for segment in item.get("segments") or []:
+                        total_seconds += int(segment.get("seconds") or 0)
+                    if not item.get("segments"):
+                        # A choice question has no recording but takes time too.
+                        total_seconds += 5
+                    booked_points += float(item.get("score") or 0.0)
                 except CancelledError:
                     raise
                 except Exception as exc:
@@ -586,6 +615,22 @@ class Completer:
                     )
                     self._emit("error", f"{label} 失败：{exc}", group=section.group_name)
                     self._info("题目失败 %s: %s", label, exc)
+
+        # The official end of a run: report the score and submit the
+        # assignment.  Without it the assignment stays "未完成" in the app.
+        if not dry_run and report["done"]:
+            try:
+                final = self._finalize_homework(
+                    token,
+                    homework,
+                    total_seconds,
+                    booked_points,
+                    paper_total,
+                )
+                report["official"] = final
+            except Exception as exc:  # noqa: BLE001 - never fail the run on it
+                self._info("收尾（上报成绩 / 提交作业）失败: %s", exc)
+                report["official"] = {"error": str(exc)}
 
         report["status"] = "completed" if report["failed"] == 0 else "partial"
         self._emit(
@@ -729,20 +774,34 @@ class Completer:
         mp3_path = self._audio.to_mp3(raw_path)
         duration_ms = result.duration_ms or self._audio.duration_ms(mp3_path)
 
-        category = score_mod.category_for(question.structure_type, question.group_name)
-        target_score = self._score_for(question, segment_max, text, duration_ms)
-        score_value = score_mod.clamp_score(target_score, segment_max)
+        category = question.paper_category or score_mod.category_for(
+            question.structure_type, question.group_name
+        )
+        target_score = self._score_for(question, text, duration_ms)
+        score_value = score_mod.clamp_ise(target_score)
+        # The points the server books for this recording: the ISE score is a
+        # share of the points of the question.
+        try:
+            points = float(score_value) / score_mod.ISE_FULL_SCORE * segment_max
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            points = 0.0
         # The XML describes exactly what was recorded.  For a question with one
         # recording per 段 that is the single 段 - the official client evaluates
         # every 段 on its own, so the XML must not carry the whole passage.
         xml_sentences = (
             [text] if question.record_per_segment else list(question.sentences or [])
         )
+        # 情景交际 (交际应答 / 回答问题): the official rubric of the question -
+        # the keywords and how much of every keyword the answer hit.
+        xml_keywords = list(question.keywords or [])
+        xml_hits = score_mod.keyword_hits(text, xml_keywords) if xml_keywords else []
         xml_text = score_mod.build_score_xml(
             text,
             category,
             target_score,
             sentences=xml_sentences,
+            keywords=xml_keywords,
+            word_hits=xml_hits,
         )
         xml_path = config.audio_cache_dir() / f"{crypto.random_hex(16)}.xml"
         xml_path.write_text(xml_text, encoding="utf-8")
@@ -753,8 +812,10 @@ class Completer:
             return {
                 "index": segment_index,
                 "status": "dry-run",
-                "score": float(score_value),
+                "score": round(points, 3),
+                "ise": float(score_value),
                 "duration_ms": duration_ms,
+                "seconds": max(1, int(round(duration_ms / 1000.0))),
                 "text": text[:80],
             }
 
@@ -781,9 +842,7 @@ class Completer:
         self.pacer.upload()
         xml_result = uploader.upload(xml_path, "xml")
 
-        score_data = score_mod.build_score_data(
-            category, float(score_value), maximum=segment_max if segment_max > 0 else 5.0
-        )
+        score_data = score_mod.build_score_data(category, float(score_value))
 
         context = dict(question.context)
         # The server identifies an answer by "resource pack + item number".
@@ -801,12 +860,13 @@ class Completer:
         context["correct"] = 1
 
         self._info(
-            "提交 %s：entity=%s order=%s serial=%s 分值=%s（满分 %s，共 %d 段）",
+            "提交 %s：entity=%s order=%s serial=%s ISE=%s 分值=%s（满分 %s，共 %d 段）",
             label,
             context.get("entity_id"),
             context["order"],
             context["serial_id"],
             score_value,
+            round(points, 3),
             segment_max,
             segment_count,
         )
@@ -873,13 +933,111 @@ class Completer:
         return {
             "index": segment_index,
             "status": "submitted-unconfirmed" if unconfirmed else "submitted",
-            "score": float(score_value),
+            "score": round(points, 3),
+            "ise": float(score_value),
             "duration_ms": duration_ms,
+            "seconds": int(context.get("use_time") or 0),
             "text": text[:80],
             "mp3_url": mp3["url"],
             "speex_uploaded": bool(speex_url),
             "message": str(mark_error) if unconfirmed else "",
         }
+
+    def _finalize_homework(
+        self,
+        token: str,
+        homework: Dict[str, Any],
+        total_seconds: int,
+        booked_points: float,
+        paper_total: float,
+    ) -> Dict[str, Any]:
+        """Report the result of the assignment and submit it.
+
+        The official client does not stop at the per-question sync: it reports
+        the total score and submits the assignment.  Without those two calls
+        the assignment keeps its old state in the official app - the answers
+        are there, but the assignment never turns into "已完成".
+
+        The reported score rate comes from the server's own bookkeeping when
+        it can be read back, so the number we report is the number the server
+        booked.
+        """
+        homework_id = str(homework.get("id") or "")
+        resource_id = str(
+            homework.get("resource_id") or (homework.get("raw") or {}).get("resource_id") or ""
+        )
+        parent_id = str(self.session.parent_account_id or "")
+        result: Dict[str, Any] = {"reported": False, "submitted": False}
+
+        # 1. What did the server book for our answers?
+        point = 0.0
+        total_point = 0.0
+        try:
+            self.pacer.request()
+            info = self.client.homework_info(token, homework_id, resource_id, parent_id)
+            point = _as_float(info.get("point"))
+            total_point = _as_float(info.get("total_point"))
+            self._info("官方记账：得分 %s / 满分 %s", point, total_point)
+        except Exception as exc:  # noqa: BLE001 - the readback is optional
+            self._info("读取官方记账失败: %s", exc)
+
+        # 2. The time the whole assignment took.
+        try:
+            self.pacer.request()
+            self.client.set_use_time(token, homework_id, resource_id, total_seconds)
+        except Exception as exc:  # noqa: BLE001
+            self._info("同步用时失败: %s", exc)
+
+        # 3. Report the score.
+        achieved = point if point > 0 else booked_points
+        denominator = total_point if total_point > 0 else paper_total
+        rate = 0
+        if denominator > 0:
+            rate = int(round(min(achieved, denominator) / denominator * 1_000_000))
+        try:
+            self.pacer.request()
+            self.client.report_score(
+                token,
+                homework_id,
+                rate,
+                1_000_000,
+                total_seconds,
+                resource_id,
+                parent_id,
+            )
+            result["reported"] = True
+            result["score_rate"] = rate
+            self._info("已上报成绩：%s / %s（%s%%）", achieved, denominator, round(rate / 10000, 1))
+        except Exception as exc:  # noqa: BLE001
+            self._info("上报成绩失败: %s", exc)
+
+        # 4. Submit the assignment.
+        try:
+            self.pacer.request()
+            self.client.submit_homework(token, homework_id, resource_id, total_seconds)
+            result["submitted"] = True
+            self._info("已提交作业")
+        except Exception as exc:  # noqa: BLE001
+            self._info("提交作业失败: %s", exc)
+
+        # 5. Read the bookkeeping back - this is what the official app shows.
+        try:
+            self.pacer.request()
+            info = self.client.homework_info(token, homework_id, resource_id, parent_id)
+            result["point"] = _as_float(info.get("point"))
+            result["total_point"] = _as_float(info.get("total_point"))
+            result["use_time"] = info.get("use_time")
+            result["submit_time"] = info.get("submit_time")
+            self._info(
+                "官方回读：得分 %s / 满分 %s，用时 %s，提交时间 %s",
+                result["point"],
+                result["total_point"],
+                result["use_time"],
+                result["submit_time"],
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._info("回读官方记账失败: %s", exc)
+        return result
 
     def _complete_choice(
         self,
@@ -899,24 +1057,32 @@ class Completer:
                 "message": "未解析到标准答案",
             }
         self.pacer.reading(question.question_text or answer)
-        score_value = score_mod.clamp_score(per_question_max, per_question_max)
+        # The score of a choice is on the ISE scale as well - the server books
+        # it against the points of the question.
+        ratio = float(self.settings.get("target_score_ratio", 1.0) or 1.0)
+        score_value = score_mod.clamp_ise(score_mod.ISE_FULL_SCORE * ratio)
 
+        points = float(score_value) / score_mod.ISE_FULL_SCORE * per_question_max
         if dry_run:
             return {
                 "group": question.group_name,
                 "order": question.order,
                 "kind": question.kind,
                 "status": "dry-run",
-                "score": float(score_value),
+                "score": round(points, 3),
+                "ise": float(score_value),
                 "answer": answer,
             }
 
         category = score_mod.category_for(question.structure_type, question.group_name)
         score_data = score_mod.build_score_data(
-            category, float(score_value), choose=answer, maximum=max(per_question_max, 1.5)
+            category, float(score_value), choose=answer
         )
         context = dict(question.context)
-        context["order"] = str(question.order)
+        # The same rule as the audio path: the item number restarts with every
+        # resource pack - the paper-wide number makes the server drop the
+        # answer.
+        context["order"] = str(question.pack_order)
         context["correct"] = 1
 
         self.pacer.request()
@@ -933,7 +1099,8 @@ class Completer:
             "order": question.order,
             "kind": question.kind,
             "status": "submitted",
-            "score": float(score_value),
+            "score": round(points, 3),
+            "ise": float(score_value),
             "answer": answer,
         }
 
@@ -976,6 +1143,13 @@ def _join_url(base_url: str, path: str) -> str:
         return path.replace("http://", "https://", 1)
     base = base_url.replace("http://", "https://", 1).rstrip("/")
     return f"{base}/{path.lstrip('/')}"
+
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _read_text(path: Optional[Path]) -> str:

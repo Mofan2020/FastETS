@@ -24,6 +24,14 @@ ROUTE_ECARD_LIST = "m/ecard/list"
 ROUTE_HOMEWORK_LIST = "g/homework/list"
 ROUTE_OSS_CONFIG = "p1/student/config/config/ossEvaluateUploadStsToken"
 ROUTE_AUDIO_SYNC = "m/audio/sync-v2"
+# The end of an assignment run - the official client does not stop at the
+# per-question sync, it reports the total score and submits the assignment.
+ROUTE_HOMEWORK_INFO = "m/homework/info"
+ROUTE_HOMEWORK_CHECKSTART = "g/homework/checkstart"
+ROUTE_HOMEWORK_SCORE_DROP = "g/homework/score-drop"
+ROUTE_HOMEWORK_SET_USE_TIME = "m/homework/set-use-time"
+ROUTE_HOMEWORK_REPORT_SCORE = "g/homework/report-score"
+ROUTE_HOMEWORK_SUBMIT = "m/homework/submit"
 
 # Business error codes we act on --------------------------------------------
 CODE_DEVICE_BIND_REQUIRED = 30014
@@ -564,7 +572,9 @@ class EtsApiClient:
             "auto_submit": 1,
             "client_time": _client_time(),
             "version": 2,
-            "graduation": 0,
+            # The official granularity of the bookkeeping (分档位): the server
+            # rounds the booked score to steps of 0.125 points.
+            "graduation": 0.125,
             "upload_file_id": "",
             "upload_file_url": mp3_url,
             "detail_file_id": "",
@@ -611,7 +621,9 @@ class EtsApiClient:
             "auto_submit": 1,
             "client_time": _client_time(),
             "version": 2,
-            "graduation": 0,
+            # The official granularity of the bookkeeping (分档位): the server
+            # rounds the booked score to steps of 0.125 points.
+            "graduation": 0.125,
             "upload_file_id": "0",
             "upload_file_url": "",
             "detail_file_id": "",
@@ -631,6 +643,121 @@ class EtsApiClient:
             "is_zk_pad": 0,
         }
         payload = self.request(ROUTE_AUDIO_SYNC, params, query={"sn": sn})
+        body = payload.get("body")
+        return body if isinstance(body, dict) else {}
+
+    # -- the end of an assignment run ---------------------------------------
+
+    def homework_info(
+        self,
+        token: str,
+        homework_id: str,
+        resource_id: str = "",
+        parent_account_id: str = "",
+    ) -> Dict[str, Any]:
+        """The official bookkeeping of one assignment.
+
+        ``point`` is the score the server booked for the assignment and
+        ``total_point`` its full score - the official app shows exactly these
+        two numbers.
+        """
+        params = self._common(token)
+        params.update(
+            {
+                "version": "2",
+                "homework_id": homework_id,
+                "resource_id": resource_id,
+            }
+        )
+        if parent_account_id:
+            params["parent_account_id"] = parent_account_id
+        payload = self.request(ROUTE_HOMEWORK_INFO, params)
+        body = payload.get("body")
+        return body if isinstance(body, dict) else {}
+
+    def checkstart(self, token: str, homework_id: str) -> Dict[str, Any]:
+        """Start an assignment - the answer carries the current resource id."""
+        params = self._common(token)
+        params.update({"homework_id": homework_id})
+        payload = self.request(ROUTE_HOMEWORK_CHECKSTART, params)
+        body = payload.get("body")
+        return body if isinstance(body, dict) else {}
+
+    def score_drop(self, token: str, homework_id: str) -> Dict[str, Any]:
+        """Drop the scores the server booked before - used before a redo."""
+        params = self._common(token)
+        params.update({"homework_id": homework_id, "resource_id": "", "seq_id": ""})
+        payload = self.request(ROUTE_HOMEWORK_SCORE_DROP, params)
+        body = payload.get("body")
+        return body if isinstance(body, dict) else {}
+
+    def set_use_time(
+        self, token: str, homework_id: str, resource_id: str, use_time: int
+    ) -> Dict[str, Any]:
+        """Tell the server how long the whole assignment took."""
+        params = self._common(token)
+        params.update(
+            {
+                "homework_id": homework_id,
+                "resource_id": resource_id,
+                "use_time": int(use_time),
+                "reset": 0,
+                "end": 1,
+                "correct": 0,
+                "version": 2,
+            }
+        )
+        payload = self.request(ROUTE_HOMEWORK_SET_USE_TIME, params)
+        body = payload.get("body")
+        return body if isinstance(body, dict) else {}
+
+    def report_score(
+        self,
+        token: str,
+        homework_id: str,
+        score_rate: int,
+        complete_rate: int,
+        use_time: int,
+        resource_id: str,
+        parent_account_id: str = "",
+    ) -> Dict[str, Any]:
+        """Report the result of the assignment.
+
+        ``score_rate`` is the achieved share of the full score in millionths
+        (``950000`` = 95 %), ``complete_rate`` the share of answered questions.
+        """
+        params = self._common(token)
+        params.update(
+            {
+                "homework_id": homework_id,
+                "homework_score_rate": int(score_rate),
+                "homework_complete_rate": int(complete_rate),
+                "homework_use_time": int(use_time),
+                "seq_id": "",
+                "is_confirm_commit": 1,
+                "resource_id": resource_id,
+            }
+        )
+        if parent_account_id:
+            params["parent_account_id"] = parent_account_id
+        payload = self.request(ROUTE_HOMEWORK_REPORT_SCORE, params)
+        body = payload.get("body")
+        return body if isinstance(body, dict) else {}
+
+    def submit_homework(
+        self, token: str, homework_id: str, resource_id: str, use_time: int
+    ) -> Dict[str, Any]:
+        """Submit the assignment - the official app marks it 完成 after this."""
+        params = self._common(token)
+        params.update(
+            {
+                "homework_id": homework_id,
+                "resource_id": resource_id,
+                "seq_id": "",
+                "use_time": int(use_time),
+            }
+        )
+        payload = self.request(ROUTE_HOMEWORK_SUBMIT, params)
         body = payload.get("body")
         return body if isinstance(body, dict) else {}
 

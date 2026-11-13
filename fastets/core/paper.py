@@ -268,6 +268,17 @@ def is_known_structure(structure_type: str) -> bool:
 # --- generic item splitting ----------------------------------------------------
 
 
+def _split_keywords(value: Any) -> List[str]:
+    """The rubric keywords of a 情景交际 question (``a | b | c``)."""
+    if not value:
+        return []
+    if isinstance(value, (list, tuple)):
+        parts = [str(item) for item in value]
+    else:
+        parts = str(value).split("|")
+    return [part.strip() for part in parts if part.strip()]
+
+
 def _entry_number(entry: Dict[str, Any], index: int) -> int:
     """The number of an item (``seq`` / ``xh`` / ``xth`` ...)."""
     for key in _ITEM_NUMBER_KEYS:
@@ -364,6 +375,7 @@ class Question:
         record_per_segment: bool = False,
         segment_max_scores: Optional[List[float]] = None,
         paper_category: str = "",
+        keywords: Optional[List[str]] = None,
     ) -> None:
         self.id = question_id
         self.homework_id = homework_id
@@ -409,6 +421,14 @@ class Question:
         ]
         # The scoring category of the 大题 (``read_sentence`` for 短文跟读).
         self.paper_category = str(paper_category or "")
+        # The rubric of a 情景交际 question: the keywords an answer has to hit
+        # (交际应答 / 回答问题).  The official client writes them into the
+        # evaluation XML together with the hit ratio of every keyword.
+        self.keywords = [
+            str(word).strip()
+            for word in (keywords or [])
+            if str(word).strip()
+        ]
 
     # -- classification -----------------------------------------------------
 
@@ -703,6 +723,7 @@ def parse_content_json(
                     max_score=max_score,
                     read_text=read_text,
                     answer_candidates=list(answers) if is_response else None,
+                    keywords=_split_keywords(entry.get("keywords")),
                 )
             )
         return Section(group_name, structure_type, questions)

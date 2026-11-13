@@ -268,6 +268,63 @@ resource_id 去找评测服务配置时找不到，返回 **`远程获取ets服�
 否则服务端可能把这次作答当成「没有练习过」。注意随包附带的 ffmpeg **没有**
 ffprobe，用 `ffprobe` 探测时长会静默返回 0，必须用 `ffmpeg -i` 的输出解析。
 
+### score —— 0–5 的 ISE 分，不是题目的分值
+
+服务端按 **`score / 5 × 该题官方满分`** 记账，也就是说 `sync-v2` 的 `score` 收的是
+**0–5 分制的 ISE 分**（讯飞评测服务的分制），不是这道题值多少分。
+
+FastETS 早期发的是「题目的分值」：交际应答每题 1 分、目标比例 0.95 → 发 `0.9`，
+服务端于是只记了 `0.9 / 5 = 18%` 的分——这就是「交际应答分数极低」的原因。
+当时看起来没问题的题型（跟读、朗读）是因为它们每题正好 5 分，两种分制恰好撞上了。
+
+现在的口径：
+
+| 字段 | 值 |
+|------|-----|
+| `score` | ISE 分，0–5，两位小数（目标比例 0.95 → `4.75`） |
+| `score_detail.total_score` | 同上 |
+| `score_detail.fluency_score` | `total × 0.98` |
+| `score_detail.accuracy_score` / `integrity_score` | `total × 0.99` |
+| `score_detail.standard_score` | `total × 0.97` |
+| `score_detail.rate_scale` | `1` |
+| `graduation` | `0.125`（官方记账的分档位） |
+
+### score_detail.category —— 官方评测类别
+
+评测类别由**题型**决定，它既是 `score_detail.category`，也是评测 XML 的根元素名。
+官方客户端的类别表（`read_chapter` = 模仿朗读、`simple_expression_ufi` = 听说信息、
+`simple_expression_ufk` = 问答信息、`topic` = 信息转述、`simple_expression_ufj` = 询问信息）：
+
+| 题型 | structure_type | category |
+|------|----------------|----------|
+| 交际应答 / 回答问题 | `collector.dialogue` / `collector.role` | `simple_expression_ufk` |
+| 听选信息 | `collector.role` | `simple_expression_ufi` |
+| 询问信息 | `collector.role` | `simple_expression_ufj` |
+| 复述 / 信息转述 | `collector.picture` | `topic` |
+| 模仿朗读 / 短文朗读 | `collector.read` | `read_chapter` |
+| 短文跟读 | `collector.repeat_essay` | `read_sentence`（取自 `paper.res` 的 `category`） |
+
+情景交际（`ufk` / `ufi` / `ufj`）的评测 XML 还带**关键词**：资源包每道题都有
+`keywords`（`a | b | c`），官方 XML 写成 `keywords="…"` 加逐关键词命中率
+`word_hit_of_each_kw="1.00|0.50"`。
+
+### 提交收尾 —— 没有它作业不会变成「已完成」
+
+官方客户端在逐题 `sync-v2` 之后还有四个动作，FastETS 现在一并执行：
+
+| 顺序 | 路由 | 作用 |
+|------|------|------|
+| 1 | `m/homework/set-use-time` | 同步整份作业的总用时 |
+| 2 | `m/homework/info` | 回读官方的 `point`（已记分）/ `total_point`（满分） |
+| 3 | `g/homework/report-score` | 上报总分与完成率（`homework_score_rate`、`homework_complete_rate`，百万分比） |
+| 4 | `m/homework/submit` | 提交作业 |
+
+**只做逐题同步的话，答案在服务端，但作业状态不会变成「已完成」。** 上报的成绩率
+优先取服务端自己记下的 `point / total_point`，取不到才用程序自己的估算。
+
+重做时先调 `g/homework/score-drop` 清掉服务端原有的分数与记录（早期用错键留下的
+废记录会混进大题总分，出现「12 分 / 10 分」这种超过满分的显示）。
+
 ### order —— 完成度卡在 75% 的真正根因
 
 服务端把一次作答记成 **资源包(entity) + 包内题号(order)** 一条记录。`order` 是

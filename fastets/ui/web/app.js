@@ -693,6 +693,21 @@ function handleEvent(event) {
         if (unconfirmed) {
           log(`另有 ${unconfirmed} 题已提交，但 ETS 评分服务没有确认，请在官方 App 里查看`, 'warn');
         }
+        // 官方记账：服务端记下的得分与满分。
+        reports.forEach((r) => {
+          const official = r.official || {};
+          if (!official || official.point === undefined) return;
+          if (official.point || official.total_point) {
+            log(
+              `官方记账：得分 ${official.point} / 满分 ${official.total_point}`
+              + (official.submitted ? '，作业已提交' : '，作业未提交'),
+              'info'
+            );
+          }
+          if (official.error) {
+            log(`收尾失败：${official.error}`, 'warn');
+          }
+        });
       }
     } else if (job.status === 'failed') {
       toast(`任务失败：${job.error || '未知错误'}`);

@@ -144,8 +144,80 @@ def test_score_xml() -> None:
     check("score xml escapes", "<" not in xml.split("content=\"")[1].split("\"")[0])
     data = score_mod.build_score_data("simple_expression", 4.5)
     parsed = json.loads(data.to_json())
-    check("score json", parsed["total_score"] == "4.5" and parsed["category"] == "simple_expression")
+    check(
+        "score json",
+        parsed["total_score"] == "4.50" and parsed["category"] == "simple_expression",
+        str(parsed),
+    )
     check("score clamp", score_mod.clamp_score(9.9, 5) == "5.0")
+    check("the ISE scale is 0 - 5", score_mod.clamp_ise(9.9) == "5.00")
+    check("the ISE scale keeps two decimals", score_mod.clamp_ise(4.756) == "4.76")
+
+
+def test_official_categories() -> None:
+    """Every 题型 has to travel with the category of the official client."""
+    from fastets.core import score as score_mod
+
+    check(
+        "交际应答 is 问答信息",
+        score_mod.category_for("collector.dialogue", "交际应答")
+        == score_mod.CATEGORY_UFK,
+        score_mod.category_for("collector.dialogue", "交际应答"),
+    )
+    check(
+        "回答问题 is 问答信息",
+        score_mod.category_for("collector.role", "回答问题")
+        == score_mod.CATEGORY_UFK,
+    )
+    check(
+        "听选信息 is 听说信息",
+        score_mod.category_for("collector.role", "听选信息")
+        == score_mod.CATEGORY_UFI,
+    )
+    check(
+        "询问信息 is 询问信息",
+        score_mod.category_for("collector.role", "询问信息")
+        == score_mod.CATEGORY_UFJ,
+    )
+    check(
+        "短文跟读 is read_sentence",
+        score_mod.category_for("collector.repeat_essay", "短文跟读")
+        == score_mod.CATEGORY_READ_SENTENCE,
+    )
+    check(
+        "短文朗读 is read_chapter",
+        score_mod.category_for("collector.read", "短文朗读")
+        == score_mod.CATEGORY_READ_CHAPTER,
+    )
+    check(
+        "复述 is topic",
+        score_mod.category_for("collector.picture", "复述")
+        == score_mod.CATEGORY_TOPIC,
+    )
+
+
+def test_dialogue_xml_rubric() -> None:
+    """The 情景交际 XML carries the keywords of the question."""
+    from fastets.core import score as score_mod
+
+    keywords = ["thank you", "really sweet"]
+    text = "Thank you. You are really sweet."
+    hits = score_mod.keyword_hits(text, keywords)
+    check("the keyword hit is complete", hits[0] == 1.0, str(hits))
+    check("the second keyword is hit too", hits[1] == 1.0, str(hits))
+    partial = score_mod.keyword_hits("the weather was nice today", ["bad weather"])
+    check("a partial hit is counted", 0.0 < partial[0] < 1.0, str(partial))
+    xml = score_mod.build_score_xml(
+        text,
+        score_mod.CATEGORY_UFK,
+        4.75,
+        keywords=keywords,
+        word_hits=hits,
+    )
+    check("the document is named after the category", "<simple_expression_ufk" in xml)
+    check("the keywords travel with it", 'keywords="thank you|really sweet"' in xml)
+    check("the hit of every keyword travels with it", 'word_hit_of_each_kw="1.00|1.00"' in xml)
+
 
 
 def test_pacing() -> None:
@@ -482,10 +554,19 @@ def _offline_completer():
 
         def upload(self, local_path, kind):
             path = Path(local_path)
-            uploaded.append({"kind": kind, "size": path.stat().st_size if path.exists() else 0})
+            record = {
+                "kind": kind,
+                "size": path.stat().st_size if path.exists() else 0,
+            }
+            if kind == "xml" and path.exists():
+                record["text"] = path.read_text(encoding="utf-8")
+            uploaded.append(record)
             return {"object_key": f"k/{kind}", "url": f"https://cdn.example/{kind}"}
 
     class FakeClient:
+        def __init__(self):
+            self.calls = []
+
         def oss_upload_config(self, token):
             return {}
 
@@ -497,7 +578,31 @@ def _offline_completer():
             submitted.append(kwargs)
             return {"code": 0}
 
-    completer.session.client = FakeClient()  # type: ignore[attr-defined]
+        # The official end of a run.
+        def homework_info(self, token, homework_id, resource_id="", parent_account_id=""):
+            self.calls.append(("homework_info", homework_id))
+            return {"point": 4.75, "total_point": 5.0, "use_time": 10, "submit_time": "now"}
+
+        def set_use_time(self, token, homework_id, resource_id, use_time):
+            self.calls.append(("set_use_time", use_time))
+            return {}
+
+        def report_score(
+            self, token, homework_id, score_rate, complete_rate, use_time, resource_id, parent_account_id=""
+        ):
+            self.calls.append(("report_score", score_rate, complete_rate))
+            return {}
+
+        def submit_homework(self, token, homework_id, resource_id, use_time):
+            self.calls.append(("submit_homework", homework_id))
+            return {}
+
+        def score_drop(self, token, homework_id):
+            self.calls.append(("score_drop", homework_id))
+            return {}
+
+    client = FakeClient()
+    completer.session.client = client  # type: ignore[attr-defined]
     import fastets.core.completer as completer_mod
 
     original_uploader = completer_mod.oss.OssUploader
@@ -506,7 +611,7 @@ def _offline_completer():
     def restore() -> None:
         completer_mod.oss.OssUploader = original_uploader  # type: ignore[assignment]
 
-    return completer, submitted, uploaded, restore
+    return completer, submitted, uploaded, restore, client
 
 
 def test_completer_offline() -> None:
@@ -523,7 +628,7 @@ def test_completer_offline() -> None:
     offline = _offline_completer()
     if offline is None:
         return
-    completer, submitted, uploaded, restore = offline
+    completer, submitted, uploaded, restore, _client = offline
     try:
         question = paper_mod.Question(
             question_id="q1",
@@ -587,7 +692,7 @@ def test_item_number_restarts_per_pack() -> None:
     offline = _offline_completer()
     if offline is None:
         return
-    completer, submitted, _uploaded, restore = offline
+    completer, submitted, _uploaded, restore, _client = offline
 
     sections = []
     # Three packs of the same 大题, one question each - the shape of 朗读词组.
@@ -727,6 +832,185 @@ def test_response_candidates() -> None:
     )
     check("role play is not a response", not role.questions[0].is_response)
     check("role play has no candidates", not role.questions[0].answer_candidates)
+
+
+def test_dialogue_submission() -> None:
+    """交际应答 sends the official category and the keyword rubric."""
+    from fastets.core import paper as paper_mod
+    from fastets.core.completer import LoadedPaper
+
+    offline = _offline_completer()
+    if offline is None:
+        return
+    completer, submitted, uploaded, restore, _client = offline
+    try:
+        payload = {
+            "structure_type": "collector.dialogue",
+            "info": {
+                "stid": "1010311",
+                "question": [
+                    {
+                        "ask": "ets_th1 <p>You look really beautiful.</p>",
+                        "xh": "1",
+                        "keywords": "thank you | really sweet",
+                        "std": [
+                            {"value": "Thank you!"},
+                            {"value": "You are really sweet."},
+                        ],
+                    },
+                    {
+                        "ask": "ets_th2 <p>Are you worried?</p>",
+                        "xh": "2",
+                        "keywords": "don't worry",
+                        "std": [{"value": "Don't worry."}],
+                    },
+                ],
+            },
+        }
+        section = paper_mod.parse_content_json(payload, "h1", "/d.zip", "交际应答")
+        for question in section.questions:
+            question.context = {
+                "homework_id": "h1",
+                "set_id": "s1",
+                "entity_id": "1010311",
+                "resource_id": "240",
+            }
+        paper = LoadedPaper({"id": "h1", "name": "测试作业"}, [section])
+        report = completer.complete_homework(
+            {"id": "h1", "name": "测试作业"}, paper=paper, dry_run=False
+        )
+    finally:
+        restore()
+
+    check("both questions were answered", len(submitted) == 2, str(len(submitted)))
+    details = [json.loads(item.get("score_detail") or "{}") for item in submitted]
+    check(
+        "the category is the official one",
+        all(d.get("category") == "simple_expression_ufk" for d in details),
+        str([d.get("category") for d in details]),
+    )
+    check(
+        "the score is on the ISE scale",
+        all(d.get("total_score") == "5.00" for d in details),
+        str([d.get("total_score") for d in details]),
+    )
+    orders = [item.get("context", {}).get("order") for item in submitted]
+    check("the item number comes from the pack", orders == ["1", "2"], str(orders))
+    xmls = [item.get("text", "") for item in uploaded if item["kind"] == "xml"]
+    check("one XML per question", len(xmls) == 2, str(len(xmls)))
+    check(
+        "the XML is named after the category",
+        all("<simple_expression_ufk" in text for text in xmls),
+        str([text[:60] for text in xmls]),
+    )
+    check(
+        "the XML carries the keywords of the question",
+        'keywords="thank you|really sweet"' in xmls[0],
+        xmls[0][:400],
+    )
+    check(
+        "the XML carries the hit of every keyword",
+        'word_hit_of_each_kw="1.00|0.00"' in xmls[0],
+        xmls[0][:400],
+    )
+    check("the run did not fail", report.get("failed") == 0, str(report.get("failed")))
+
+
+def test_choice_item_number() -> None:
+    """A choice question also carries the item number of its own pack."""
+    from fastets.core import paper as paper_mod
+    from fastets.core.completer import LoadedPaper
+
+    offline = _offline_completer()
+    if offline is None:
+        return
+    completer, submitted, uploaded, restore, _client = offline
+    try:
+        payload = {
+            "structure_type": "collector.choose",
+            "info": {
+                "xtlist": [
+                    {"xh": "1", "xt_nr": "What color is it?", "answer": "A",
+                     "xxlist": [{"xx_mc": "A", "xx_nr": "Red"}]},
+                    {"xh": "2", "xt_nr": "Where is it?", "answer": "B",
+                     "xxlist": [{"xx_mc": "B", "xx_nr": "Here"}]},
+                ],
+            },
+        }
+        section = paper_mod.parse_content_json(
+            payload, "h1", "/c.zip", "听后选择", order_offset=7
+        )
+        for question in section.questions:
+            question.context = {
+                "homework_id": "h1",
+                "set_id": "s1",
+                "entity_id": "c1",
+                "resource_id": "240",
+            }
+        paper = LoadedPaper({"id": "h1", "name": "测试作业"}, [section])
+        completer.complete_homework(
+            {"id": "h1", "name": "测试作业"}, paper=paper, dry_run=False
+        )
+    finally:
+        restore()
+
+    orders = [item.get("context", {}).get("order") for item in submitted]
+    check("the choices use the item number of the pack", orders == ["1", "2"], str(orders))
+    scores = [float(item.get("score", 0)) for item in submitted]
+    check("the choice score is on the ISE scale", scores == [5.0, 5.0], str(scores))
+
+
+def test_official_finalize() -> None:
+    """A run ends with the official report + submit - that is what makes the
+    assignment "已完成" in the official app."""
+    from fastets.core import paper as paper_mod
+    from fastets.core.completer import LoadedPaper
+
+    offline = _offline_completer()
+    if offline is None:
+        return
+    completer, submitted, uploaded, restore, client = offline
+    try:
+        question = paper_mod.Question(
+            question_id="q1",
+            homework_id="h1",
+            content_url="",
+            order=1,
+            group_name="朗读句子",
+            structure_type="collector.read",
+            question_text="朗读这句话",
+            answers=["Hello everyone."],
+            context={"homework_id": "h1", "set_id": "s1", "entity_id": "e1"},
+            max_score=5.0,
+        )
+        paper = LoadedPaper(
+            {"id": "h1", "name": "测试作业"},
+            [paper_mod.Section("朗读句子", "collector.read", [question])],
+        )
+        report = completer.complete_homework(
+            {"id": "h1", "name": "测试作业"}, paper=paper, dry_run=False
+        )
+    finally:
+        restore()
+
+    calls = [call[0] for call in client.calls]
+    check("the official bookkeeping was read", "homework_info" in calls, str(calls))
+    check("the use time was synced", "set_use_time" in calls, str(calls))
+    check("the score was reported", "report_score" in calls, str(calls))
+    check("the assignment was submitted", "submit_homework" in calls, str(calls))
+    official = report.get("official") or {}
+    check("the score was reported", official.get("reported") is True, str(official))
+    check("the assignment was submitted", official.get("submitted") is True, str(official))
+    check(
+        "the reported rate follows the official bookkeeping",
+        official.get("score_rate") == 950000,
+        str(official.get("score_rate")),
+    )
+    check(
+        "the official score was read back",
+        official.get("point") == 4.75 and official.get("total_point") == 5.0,
+        str(official),
+    )
 
 
 def test_log_redaction() -> None:
@@ -919,8 +1203,10 @@ def test_passage_and_word_types() -> None:
     check("the 大题 is worth two points", section.max_score == 2.0, str(section.max_score))
     check("the official category is kept", section.category == "read_sentence", section.category)
     check(
-        "the evaluation is a chapter",
-        score_mod.category_for(question.structure_type, question.group_name) == "read_chapter",
+        "the evaluation is a read_sentence",
+        score_mod.category_for(question.structure_type, question.group_name)
+        == score_mod.CATEGORY_READ_SENTENCE,
+        score_mod.category_for(question.structure_type, question.group_name),
     )
     check("the 大题 is worth 10 points without a 卷面 XML", paper_mod.part_max_score("短文跟读") == 10.0)
 
@@ -996,7 +1282,7 @@ def test_passage_submission_keys() -> None:
     offline = _offline_completer()
     if offline is None:
         return
-    completer, submitted, uploaded, restore = offline
+    completer, submitted, uploaded, restore, _client = offline
     try:
         payload = {
             "structure_type": "collector.repeat_essay",
@@ -1036,8 +1322,23 @@ def test_passage_submission_keys() -> None:
     check("the 段 index is the serial id", serials == ["0", "1", "2"], str(serials))
     entities = {item.get("context", {}).get("entity_id") for item in submitted}
     check("all recordings belong to the item", entities == {"592132"}, str(entities))
+    # The score travels on the ISE scale (0 - 5) - the server books it against
+    # the points of the question.
     scores = [float(item.get("score", 0)) for item in submitted]
-    check("every 段 is worth one point", scores == [1.0, 1.0, 1.0], str(scores))
+    check("every 段 is scored on the ISE scale", scores == [5.0, 5.0, 5.0], str(scores))
+    details = [json.loads(item.get("score_detail") or "{}") for item in submitted]
+    check(
+        "the score detail carries the ISE score",
+        all(d.get("total_score") == "5.00" for d in details),
+        str([d.get("total_score") for d in details]),
+    )
+    check(
+        "the score detail carries the official category",
+        all(d.get("category") == "read_sentence" for d in details),
+        str([d.get("category") for d in details]),
+    )
+    points = report["items"][0].get("score")
+    check("the booked points are one per 段", points == 3.0, str(points))
 
 
 
@@ -1872,6 +2173,11 @@ def main() -> int:
         test_paper_res_parsing,
         test_passage_and_word_types,
         test_passage_submission_keys,
+        test_dialogue_submission,
+        test_choice_item_number,
+        test_official_finalize,
+        test_official_categories,
+        test_dialogue_xml_rubric,
         test_log_redaction,
         test_config,
         test_live_api,
