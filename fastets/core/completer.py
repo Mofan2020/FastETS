@@ -1037,6 +1037,20 @@ class Completer:
             )
         except Exception as exc:  # noqa: BLE001
             self._info("回读官方记账失败: %s", exc)
+
+        # 6. The per-question records - they show which question the server
+        # booked and how much it gave for it.
+        try:
+            self.pacer.request()
+            detail = self.client.score_detail(token, homework_id, resource_id, parent_id)
+            rows = detail.get("data") or detail.get("score") or detail.get("list")
+            if isinstance(rows, list):
+                self._info("官方逐题记录（%d 条）：%s", len(rows), _short(rows[:12], 1200))
+                result["records"] = len(rows)
+            elif detail:
+                self._info("官方逐题记录：%s", _short(detail, 800))
+        except Exception as exc:  # noqa: BLE001
+            self._info("读取官方逐题记录失败: %s", exc)
         return result
 
     def _complete_choice(

@@ -601,6 +601,10 @@ def _offline_completer():
             self.calls.append(("score_drop", homework_id))
             return {}
 
+        def score_detail(self, token, homework_id, resource_id="", parent_account_id=""):
+            self.calls.append(("score_detail", homework_id))
+            return {"data": []}
+
     client = FakeClient()
     completer.session.client = client  # type: ignore[attr-defined]
     import fastets.core.completer as completer_mod

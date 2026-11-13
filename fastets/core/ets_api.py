@@ -27,6 +27,7 @@ ROUTE_AUDIO_SYNC = "m/audio/sync-v2"
 # The end of an assignment run - the official client does not stop at the
 # per-question sync, it reports the total score and submits the assignment.
 ROUTE_HOMEWORK_INFO = "m/homework/info"
+ROUTE_HOMEWORK_SCORE_DETAIL = "g/homework/score-detail"
 ROUTE_HOMEWORK_CHECKSTART = "g/homework/checkstart"
 ROUTE_HOMEWORK_SCORE_DROP = "g/homework/score-drop"
 ROUTE_HOMEWORK_SET_USE_TIME = "m/homework/set-use-time"
@@ -672,6 +673,27 @@ class EtsApiClient:
         if parent_account_id:
             params["parent_account_id"] = parent_account_id
         payload = self.request(ROUTE_HOMEWORK_INFO, params)
+        body = payload.get("body")
+        return body if isinstance(body, dict) else {}
+
+    def score_detail(
+        self,
+        token: str,
+        homework_id: str,
+        resource_id: str = "",
+        parent_account_id: str = "",
+    ) -> Dict[str, Any]:
+        """The per-question records the server booked for an assignment."""
+        params = self._common(token)
+        params.update(
+            {
+                "homework_id": homework_id,
+                "resource_id": resource_id,
+            }
+        )
+        if parent_account_id:
+            params["parent_account_id"] = parent_account_id
+        payload = self.request(ROUTE_HOMEWORK_SCORE_DETAIL, params)
         body = payload.get("body")
         return body if isinstance(body, dict) else {}
 
