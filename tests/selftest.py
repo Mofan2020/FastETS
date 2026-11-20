@@ -1154,13 +1154,13 @@ def _paper_res(caption: str, stid: str, count: int, max_score: str = "1") -> str
 
 
 def test_passage_and_word_types() -> None:
-    """短文跟读 is one item with one recording per 段 - 单词 is one word.
+    """短文跟读 is one recording per 段 - 单词 is one word.
 
     短文跟读 (collector.repeat_essay) ships the whole passage plus its
     sentence-by-sentence timeline, and the official 卷面 XML (``paper.res``)
     lists one item per 段 with one point each.  The official control file of
-    the item records one clip per 段, so the answer key is "one item
-    (order=1) + one recording per 段 (serial_id = 0..n-1)".
+    the set lists the same 段 as ``vari.item`` entries.  So the 段 are
+    questions of the pack: one recording each, each with its own order.
     """
     from fastets.core import paper as paper_mod
     from fastets.core import score as score_mod
@@ -1274,11 +1274,85 @@ def test_paper_res_parsing() -> None:
     check("an empty file does not crash", paper_mod.parse_paper_res("")["sections"] == [])
 
 
-def test_passage_submission_keys() -> None:
-    """A 短文跟读 answer is one item with one recording per 段.
+def test_real_pack_segments_get_their_own_order() -> None:
+    """Every 段 of a real 跟读 pack gets its own order.
 
-    The order stays 1 (the passage is a single item of the pack) and the
-    段 index is the ``serial_id`` - that is the key the server uses.
+    The server books an answer by the order, so two 段 that share an order
+    share a key: the second one overwrites the first and the pack is worth
+    one 段 instead of all of them.  That is exactly the bug this test
+    guards - the completion of a 跟读 assignment stuck at about 5%.
+
+    The packs under the cache are the real ones from the user's homework.
+    """
+    from fastets.core import paper as paper_mod
+
+    cache = config.papers_cache_dir()
+    if not cache.exists():
+        print("[SKIP] real pack orders  -> 没有缓存的资源包")
+        return
+
+    checked = 0
+    for pack in sorted(cache.iterdir()):
+        content = pack / "content.json"
+        if not content.is_file():
+            continue
+        try:
+            payload = json.loads(content.read_text(encoding="utf-8-sig", errors="replace"))
+        except (OSError, ValueError):
+            continue
+        structure = str(payload.get("structure_type") or "")
+        if structure not in ("collector.repeat_essay", "collector.repeat_dialogue"):
+            continue
+        info = payload.get("info") or {}
+        res_file = pack / "paper.res"
+        paper_res = (
+            paper_mod.parse_paper_res(res_file.read_text(encoding="utf-8-sig", errors="replace"))
+            if res_file.is_file()
+            else None
+        )
+        section = paper_mod.parse_content_json(
+            payload, "h", "/h.zip", str(info.get("group_name") or "跟读"), paper_res=paper_res
+        )
+        for question in section.questions:
+            orders = question.segment_orders
+            check(
+                "every 段 has an order",
+                len(orders) == len(question.sentences),
+                f"{len(orders)} 個序號 / {len(question.sentences)} 段",
+            )
+            check(
+                "the orders are unique",
+                len(set(orders)) == len(orders),
+                str(orders[:12]),
+            )
+            check(
+                "the orders count from 1",
+                sorted(orders) == list(range(1, len(orders) + 1)),
+                str(sorted(orders)[:12]),
+            )
+            check(
+                "the 段 keep the pack's own numbering",
+                orders == sorted(orders),
+                str(orders[:12]),
+            )
+            checked += 1
+
+    if not checked:
+        print("[SKIP] real pack orders  -> 缓存里没有跟读类的资源包")
+    else:
+        print(f"    檢查了 {checked} 個跟讀包")
+
+
+def test_passage_submission_keys() -> None:
+    """A 短文跟读 answer is one recording per 段, each with its own order.
+
+    The server books an answer by the **order**.  It told us so: for a
+    21-段 pack it answered ``total_point: 21.0``, and every answer sent
+    with ``order=1`` landed on the same key and overwrote its predecessor
+    (the pack was then worth one 段 instead of 21).
+
+    So each 段 is a question of the pack with its own order, and the
+    serial id is always 0.
     """
     from fastets.core import paper as paper_mod
     from fastets.core.completer import LoadedPaper
@@ -1322,10 +1396,18 @@ def test_passage_submission_keys() -> None:
     check("one submission per 段", len(submitted) == 3, str(len(submitted)))
     orders = [item.get("context", {}).get("order") for item in submitted]
     serials = [item.get("context", {}).get("serial_id") for item in submitted]
-    check("the item number stays 1", orders == ["1", "1", "1"], str(orders))
-    check("the 段 index is the serial id", serials == ["0", "1", "2"], str(serials))
+    check(
+        "every 段 has its own order",
+        orders == ["1", "2", "3"],
+        str(orders),
+    )
+    check(
+        "the serial id is always 0",
+        serials == ["0", "0", "0"],
+        str(serials),
+    )
     entities = {item.get("context", {}).get("entity_id") for item in submitted}
-    check("all recordings belong to the item", entities == {"592132"}, str(entities))
+    check("all recordings belong to the pack", entities == {"592132"}, str(entities))
     # The score travels on the ISE scale (0 - 5) - the server books it against
     # the points of the question.
     scores = [float(item.get("score", 0)) for item in submitted]
@@ -2176,6 +2258,7 @@ def main() -> int:
         test_generic_item_splitting,
         test_paper_res_parsing,
         test_passage_and_word_types,
+        test_real_pack_segments_get_their_own_order,
         test_passage_submission_keys,
         test_dialogue_submission,
         test_choice_item_number,

@@ -705,10 +705,23 @@ class EtsApiClient:
         body = payload.get("body")
         return body if isinstance(body, dict) else {}
 
-    def score_drop(self, token: str, homework_id: str) -> Dict[str, Any]:
-        """Drop the scores the server booked before - used before a redo."""
+    def score_drop(
+        self, token: str, homework_id: str, resource_id: str = ""
+    ) -> Dict[str, Any]:
+        """Drop the scores the server booked before - used before a redo.
+
+        The route needs the ``resource_id`` of the assignment.  Without it
+        the server answers ``参数错误`` and the old records stay, so they
+        are booked into the total again.
+        """
         params = self._common(token)
-        params.update({"homework_id": homework_id, "resource_id": "", "seq_id": ""})
+        params.update(
+            {
+                "homework_id": homework_id,
+                "resource_id": resource_id,
+                "seq_id": "",
+            }
+        )
         payload = self.request(ROUTE_HOMEWORK_SCORE_DROP, params)
         body = payload.get("body")
         return body if isinstance(body, dict) else {}

@@ -309,7 +309,15 @@ class Completer:
             try:
                 token = self.session.token or self.session.ensure_fresh_token()
                 self.pacer.request()
-                self.client.score_drop(token, str(homework.get("id") or ""))
+                self.client.score_drop(
+                    token,
+                    str(homework.get("id") or ""),
+                    str(
+                        homework.get("resource_id")
+                        or (homework.get("raw") or {}).get("resource_id")
+                        or ""
+                    ),
+                )
                 self._info("重做：已清除服务端原有的分数与记录")
             except Exception as exc:  # noqa: BLE001 - the run continues anyway
                 self._info("清除服务端原有分数失败（继续提交）: %s", exc)
@@ -682,6 +690,15 @@ class Completer:
             share = per_question_max / len(segments)
             segment_maxes = [share] * len(segments)
 
+        # The order of every 段.  A question that is recorded one 段 at a
+        # time has an order of its own for each 段 - the 段 are questions of
+        # the pack.  When the pack shipped its official segmentation we use
+        # it; otherwise the 段 are numbered after the question's own order.
+        if question.segment_orders and len(question.segment_orders) == len(segments):
+            segment_orders = list(question.segment_orders)
+        else:
+            segment_orders = [question.pack_order + index for index in range(len(segments))]
+
         results: List[Dict[str, Any]] = []
         for segment_index, text in enumerate(segments):
             self._check_cancel()
@@ -696,6 +713,7 @@ class Completer:
                     len(segments),
                     label,
                     dry_run,
+                    order=segment_orders[segment_index],
                 )
             )
         unconfirmed = any(
@@ -761,6 +779,7 @@ class Completer:
         segment_count: int,
         label: str,
         dry_run: bool,
+        order: Optional[int] = None,
     ) -> Dict[str, Any]:
         # Pace like a human: read the text first, then upload.
         self.pacer.reading(text)
@@ -850,10 +869,22 @@ class Completer:
         # with every pack - it is not the running number of the whole paper.
         # Sending the paper-wide number makes the server drop the answer:
         # the assignment then stays at e.g. 75% forever.
-        context["order"] = str(question.pack_order)
-        # The clip inside the question (逐句跟读 sends one record per
-        # sentence, so the clip index is the second part of the key).
-        context["serial_id"] = str(segment_index)
+        #
+        # A question that is recorded one 段 at a time (逐句跟读 / 短文跟读)
+        # has an order of its own for every 段: the 段 are questions of the
+        # pack, numbered 1, 2, 3 ...  The server counts the 段 by the order
+        # (it answered ``total_point: 21.0`` for a 21-段 pack), so sending
+        # them all as the same order puts every answer on one key, where
+        # each overwrites the last - the pack is then worth one 段 instead
+        # of all of them.
+        if order is not None:
+            context["order"] = str(order)
+        else:
+            context["order"] = str(question.pack_order)
+        # The serial id is always 0.  The server keys the answer by the
+        # order alone; a growing serial id does not create a new answer,
+        # it only changes the request.
+        context["serial_id"] = "0"
         # The official client reports how long the answer took (in seconds).
         # A zero here makes the server treat the answer as "not practised".
         context["use_time"] = max(1, int(round((duration_ms or 0) / 1000.0)))

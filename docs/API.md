@@ -151,13 +151,14 @@ password       = MD5(seed).upper() + MD5(上述大写 hex 的 ASCII).upper()
 `info.audio`。所以它就是**一个 item（order=1）、一条录音**，读的是 `info.value` 里的那个词。
 实测一份作业的 Vocabulary 大题有 43 个这样的包（871333…871375），每包一词。
 
-### collector.repeat_essay —— 一道题、每段一条录音
+### collector.repeat_essay / repeat_dialogue —— 每段一道题、每段一条录音
 
-`info.value` 是**整篇短文**，`info.sublist` 是它的分句表，每句带 `seq`、`text`、
-`translate`，以及该句在原音频里的 `begintime` / `endtime`（实测一篇 10 句、约 50 秒，
-时间轴从 0 连续到 49.9）。
+`info.value` 是**整篇短文**（对话跟读里是整段对话），`info.sublist` 是它的分句表，
+每句带 `seq`、`text`、`translate`，以及该句在原音频里的 `begintime` / `endtime`
+（实测一篇 10 句、约 50 秒，时间轴从 0 连续到 49.9）。
 
-**这个包是「一个 item + 每段一条录音」**。这一点由资源包里的两份官方文件确定：
+**这个包是「N 段 = N 道题」，每段录一条音，段号就是 order。** 这一点由资源包里的
+两份官方文件确定：
 
 ```
 paper.res                                   # 官方卷面 XML
@@ -166,23 +167,20 @@ paper.res                                   # 官方卷面 XML
   ...  共 10 条，每条 1 分
 </section>
 
-592132_1.ctrl                               # 官方控制文件（每段一个）
-{"id":"592132","comment":"跟读题型","proto":"item.passage","set":[
-  {"type":"action.record","filename":"592132_1","playtime":3.66,"playhint":"录音中"}, ...]}
+paper.ctrl                                  # 官方控制文件（整个 set 一份）
+{"id":"550889","comment":"课文跟读","proto":"item.passage","set":[
+  {"type":"vari.item","filename":"592132_1","playtime":2}, ...]}
 ```
 
-- 整篇短文在服务端只有**一个 item**（`stid=592132`），也就是 `order=1`；十句话是它的
-  十段（`paper.res` 的 item id 就是 `592132_1` … `592132_10`），官方客户端对每一段
-  单独录一条音（`action.record` 的 filename 就是段号）。
-- 早先两个方向都是错的：**v1.0.5** 把分句表拆成 10 个 item（order 1…10），服务端只认
-  order=1 那一条，其余九条成了废记录；**v1.0.8** 把整篇录成一条，item 号对了但十段里
-  只答了一段。两次都停在 12 分。
-- 正确的键是 **`(entity_id, order=1, serial_id=段序号)`**：`serial_id` 从 0 递增到
-  N-1，`order` 始终是 1。
+- `paper.res` 的 item id 是 `<entity_id>_<段号>`（实测 `626978_1` … `626978_21`），
+  尾号就是段号，每段 1 分；`paper.ctrl` 列出同样多的 `vari.item`，filename 就是那个 id。
+- 资源包的 `info.sublist` 里每句自带 `seq`（1 起），就是段号。
+- 所以发出去的键是 **`(entity_id, order=段号, serial_id=0)`**。服务端只认 `order`
+  —— 见下面「serial_id 与逐句跟读的 order」一节，那里有实测。
 - 每条录音的评测 XML **只描述它自己那一段**（`read_chapter` 类别，句表只有一段），
   不把整篇塞进同一份 XML。
-- 分值直接取官方卷面：每段 `MaxScore=1` 分，整道大题 8 分或 10 分（取决于包里的段数）。
-  没有 `paper.res` 时按 10 分兜底。
+- 分值直接取官方卷面：每段 `MaxScore=1` 分，整道大题的分值是段数之和（实测 8 / 10 /
+  21 / 28 分都有）。没有 `paper.res` 时按段数均分。
 
 `paper.res` 是每个资源包里都有的官方卷面 XML（`fastets/core/paper.py` 的
 `parse_paper_res()` 会解析它），它同时给出大题的分值、分类（`read_sentence`）和
@@ -354,17 +352,44 @@ FastETS 早期把 `order` 发成了「整份卷子里的第几题」，而卷子
 `Question.pack_order` 才是发出去的值）。改完后同样这份作业的 12 条记录
 `(entity, order)` 两两不同，命中 12/12。
 
-### serial_id
+### serial_id 与逐句跟读的 order —— 跟读的键是 order，不是 serial_id
 
-`serial_id` 是**这道题里的第几段录音**（0 开始）：逐句跟读一题要分句提交，
-每句一条记录，`serial_id` 依次是 0、1、2…；`order` 保持不变。
+`serial_id` 恒为 `"0"`。**服务端按 `order` 记账**：`order` 是这道题在它那个
+资源包里的题号，每段录音是包里的**一道题**，`serial_id` 只是附属字段。
 
-> v1.0.4 曾把 `serial_id` 当成「包内第几条记录」并按包递增，那次改动对完成度
-> 没有影响（实测 v1.0.4 仍是 75%），已在 v1.0.6 改回「题内第几段」。
+逐句跟读 / 短文跟读 / 对话跟读（`collector.repeat_essay` /
+`collector.repeat_dialogue`）是「一个包，N 段，N 道题」：
+
+- 官方卷面 XML（`paper.res`）的 section 里每段一个 item，id 是
+  `<entity_id>_<段号>`：`626978_1` … `626978_21`，每段 1 分；
+- 官方控制文件（`paper.ctrl`）列出同样多的 `vari.item`，filename 就是那个 id；
+- 资源包的 `info.sublist` 是分句表，每句带自己的 `seq`（1 起）。
+
+所以键是 **`(entity_id, order=段号, serial_id=0)`**，段号取 `sublist` 里的
+`seq`。
+
+> **曾经写反了，三次都错在同一个地方。** v1.0.4 把 `serial_id` 当成「包内第几条
+> 记录」；v1.0.5 把分句表拆成 N 个 item 但题号不是包里的号；v1.0.9 认定
+> 「整篇短文只有一个 item（`order=1`），十句话是它的十段」，于是发
+> `order=1` + `serial_id=0…N-1`。
 >
-> v1.0.9 在短文跟读上**证实**了这个模型：官方卷面 XML（`paper.res`）里整篇短文只有
-> 一个 item（`order=1`），十句话是它的十段，官方控制文件对每段各录一条音——所以键是
-> `(entity_id, order=1, serial_id=0…N-1)`。
+> 那是错的。**服务端只认 `order`。** 21 段全部发成 `order=1`，21 条记录落在
+> 同一个键上互相覆盖，最后只剩 5 条被记下 —— 作业完成度卡在 5%，官方 App 里
+> 永远停在 4.8%。
+
+实测（2026-11-20，对话跟读 21 段，`entity_id=626978`）：
+
+| 发出去的 | 服务端回应 | 作业完成度 |
+|---|---|---|
+| `order=1` × 21 段（`serial_id` 0…20） | `total_complete: 5`、`total_point: 21.0` | 4.76 / 100 = **4.8%** |
+| `order=1`…`order=21`（`serial_id` 恒 0） | `total_complete: 100`、`total_point: 21.0` | 100 / 100 = **100%** |
+
+服务端的回应里有两个字段直接印证了这点：`total_point` 是这个 entity 的总
+题数（21 段 → 21.0），`total_complete` 是这份作业已记下的条数。发
+`order=21` 时回应 `point: 21.0`，也就是这道题拿满了 21 分。
+
+**别把 `total_point` 当成「这个大题的分值上限」** —— 它就是服务端那边这道题
+有几道题。发错 order 的时候它不会变小，只会让你少记几条。
 
 选择题用同一个路由，但 `upload_file_url` / `spx_file_url` / `detail_file_url` 留空，
 `upload_file_id` 固定为 `"0"`，并在 `score_detail.choose` 里带上所选项。

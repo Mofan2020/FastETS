@@ -376,6 +376,7 @@ class Question:
         segment_max_scores: Optional[List[float]] = None,
         paper_category: str = "",
         keywords: Optional[List[str]] = None,
+        segment_orders: Optional[List[int]] = None,
     ) -> None:
         self.id = question_id
         self.homework_id = homework_id
@@ -421,6 +422,16 @@ class Question:
         ]
         # The scoring category of the 大题 (``read_sentence`` for 短文跟读).
         self.paper_category = str(paper_category or "")
+        # The order of every 段 of a question that is recorded one 段 at a
+        # time (逐句跟读 / 短文跟读).
+        #
+        # The server books an answer by **the order**, not by the serial
+        # id: it told us so (``total_point: 21.0`` for a 21-段 pack, and
+        # every answer we sent with ``order=1`` landed on the same key and
+        # overwrote its predecessor).  So each 段 is a question of its own
+        # and the order grows with it.  Empty for every other shape - there
+        # the question's own ``pack_order`` is the order.
+        self.segment_orders = [int(value) for value in (segment_orders or [])]
         # The rubric of a 情景交际 question: the keywords an answer has to hit
         # (交际应答 / 回答问题).  The official client writes them into the
         # evaluation XML together with the hit ratio of every keyword.
@@ -526,6 +537,7 @@ class Question:
             "sentences": self.sentences,
             "record_per_segment": self.record_per_segment,
             "segment_max_scores": self.segment_max_scores,
+            "segment_orders": self.segment_orders,
             "paper_category": self.paper_category,
             "context": self.context,
         }
@@ -783,7 +795,8 @@ def parse_content_json(
         return Section(group_name, structure_type, questions)
 
     if structure_type in ("collector.repeat_essay", "collector.repeat_dialogue"):
-        # 短文跟读 / 短文复述: ONE question, ONE recording per 段.
+        # 短文跟读 / 短文复述 / 对话跟读: ONE pack, ONE recording per 段,
+        # and every 段 is a question of its own.
         #
         # The pack carries the whole passage in ``info.value`` and its
         # sentence-by-sentence breakdown in ``info.sublist`` (each entry with
@@ -791,32 +804,65 @@ def parse_content_json(
         # sentence inside the original audio).  The official 卷面 XML
         # (``paper.res``) lists one item per 段 - ``592132_1`` ...
         # ``592132_10``, each worth one point - and the official control file
-        # of the item records one clip per 段.  So the answer key is
-        # "one item (order=1) + one recording per 段 (serial_id = 0..n-1)".
+        # of the set (``paper.ctrl``) lists the same count as ``vari.item``
+        # entries whose filename is that item id.
         #
-        # Both earlier attempts failed: one record per sentence with the item
-        # number growing (1..n) addressed items that do not exist, and a
+        # **The order grows with the 段.**  The server books an answer by the
+        # order (it answered ``total_point: 21.0`` for a 21-段 pack), so the
+        # 段 are 21 questions with orders 1..21 and the serial id is always
+        # 0.  Sending them all as ``order=1`` with a growing serial id puts
+        # every answer on the same key, where each one overwrites the last:
+        # the pack is then worth one 段 instead of 21.
+        #
+        # Two earlier attempts failed: one record per sentence with the item
+        # number growing addressed items that do not exist (that was the
+        # right shape, but the item numbers were not the pack's), and a
         # single record for the whole passage answered a single 段.
-        sentences: List[str] = []
-        for raw in info.get("sublist") or []:
+        # The 分句 table.  Every entry carries its own number (``seq``),
+        # and that number is the 段's own order in the pack - it is what the
+        # server counts the 段 by.  The list is sorted by it, so the 段 keep
+        # the order the pack gave them even if the list itself is shuffled.
+        segments: List[tuple[int, str]] = []
+        for index, raw in enumerate(info.get("sublist") or []):
             entry = raw if isinstance(raw, dict) else {}
             text = clean_text(entry.get("text") if entry else raw)
-            if text:
-                sentences.append(text)
+            if not text:
+                continue
+            number = _as_int(entry.get("seq"), 0)
+            if number <= 0:
+                number = index + 1
+            segments.append((number, text))
+        segments.sort(key=lambda item: item[0])
+        sentences: List[str] = [text for _, text in segments]
+        # The order of every 段: the pack's own numbers.  The server counts
+        # the 段 by the order, so this is what makes the pack worth all of
+        # its points instead of one.
+        segment_orders: List[int] = [number for number, _ in segments]
         passage = clean_text(info.get("value")) or " ".join(sentences)
 
         stid = str(info.get("stid") or "")
         section_info = paper_res_section(paper_res, stid)
         res_items = list((section_info or {}).get("items") or [])
+        # The official 卷面 lists the 段 as ``<stid>_<n>``; the number in the
+        # id is the 段's own order.  Reading the score out of the id makes
+        # the mapping exact instead of relying on the list happening to be
+        # in order.
+        res_scores: Dict[int, float] = {}
+        for item in res_items:
+            number = 0
+            item_id = str(item.get("id") or "")
+            if "_" in item_id:
+                tail = item_id.rsplit("_", 1)[1]
+                if tail.isdigit():
+                    number = int(tail)
+            if number <= 0:
+                number = len(res_scores) + 1
+            res_scores[number] = float(item.get("max_score") or 0)
+        total_max = sum(res_scores.values())
         segment_scores: List[float] = []
-        total_max = 0.0
-        if res_items:
-            total_max = sum(float(item.get("max_score") or 0) for item in res_items)
-            if len(res_items) == len(sentences):
-                # The official list is the segmentation - one item per 段.
-                segment_scores = [
-                    float(item.get("max_score") or 0) for item in res_items
-                ]
+        if res_scores and len(res_scores) == len(sentences):
+            # The official list is the segmentation - one item per 段.
+            segment_scores = [res_scores.get(order, 0.0) for order in segment_orders]
         if not total_max:
             total_max = part_max_score(group_name)
         if not segment_scores:
@@ -846,6 +892,7 @@ def parse_content_json(
                 record_per_segment=True,
                 segment_max_scores=segment_scores,
                 paper_category=str((section_info or {}).get("category") or ""),
+                segment_orders=segment_orders,
             )
         )
         return Section(
