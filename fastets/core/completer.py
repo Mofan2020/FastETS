@@ -1043,6 +1043,11 @@ class Completer:
             self._info("上报成绩失败: %s", exc)
 
         # 4. Submit the assignment.
+        #
+        # The server closes a homework by itself as soon as the last
+        # answer is in, so this call can come back with "作业不存在"
+        # for a homework that is already handed in.  The bookkeeping
+        # below is the judge of that.
         try:
             self.pacer.request()
             self.client.submit_homework(token, homework_id, resource_id, total_seconds)
@@ -1066,6 +1071,12 @@ class Completer:
                 result["use_time"],
                 result["submit_time"],
             )
+            # A homework the server closed by itself counts as handed
+            # in: the call above says "作业不存在" for one, but the
+            # bookkeeping says it is done.
+            if not result["submitted"] and result.get("submit_time"):
+                result["submitted"] = True
+                self._info("作业已经交上去了（服务端自己收的）")
         except Exception as exc:  # noqa: BLE001
             self._info("回读官方记账失败: %s", exc)
 

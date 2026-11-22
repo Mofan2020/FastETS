@@ -14,6 +14,31 @@ from pathlib import Path
 ROOT = Path(SPECPATH).parent.resolve()
 sys.path.insert(0, str(ROOT))
 
+
+def read_version() -> str:
+    """The version the package carries.
+
+    It is written down in one place, in ``fastets/__init__.py``, and read
+    from there.  A version written twice is a version that is wrong in
+    one of the two places, and the wrong one is what the person sees
+    in the app's about window.
+    """
+    import re
+
+    text = (ROOT / "fastets" / "__init__.py").read_text(encoding="utf-8")
+    match = re.search(
+        r"""^__version__\s*(?::\s*str)?\s*=\s*["']([^"']+)["']""",
+        text,
+        re.M,
+    )
+    if not match:
+        raise SystemExit("[FastETS] fastets/__init__.py 里找不到 __version__")
+    return match.group(1)
+
+
+VERSION = read_version()
+print(f"[FastETS] version {VERSION}")
+
 datas = [(str(ROOT / "fastets" / "ui" / "web"), "fastets/ui/web")]
 
 # Application icon: macOS wants an .icns, Windows an .ico.
@@ -116,13 +141,13 @@ if sys.platform == "darwin":
         name="FastETS.app",
         icon=APP_ICON,
         bundle_identifier="cc.fastets.app",
-        version="1.0.8",
+        version=VERSION,
         info_plist={
             "CFBundleName": "FastETS",
             "CFBundleDisplayName": "FastETS",
             "LSMinimumSystemVersion": "10.15",
             "NSHighResolutionCapable": True,
-            "CFBundleShortVersionString": "1.0.8",
-            "CFBundleVersion": "1.0.8",
+            "CFBundleShortVersionString": VERSION,
+            "CFBundleVersion": VERSION,
         },
     )
